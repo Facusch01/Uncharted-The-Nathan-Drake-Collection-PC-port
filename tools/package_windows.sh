@@ -101,12 +101,16 @@ u3_import() {   # Uncharted 3's importer, its recipe and tools, and the newest m
     for d in "$builds"/v*/; do [[ $(basename -- "$d") == "$newest" ]] || rm -rf -- "$d"; done
     # the helper's link (link.json: its bytes and where they go in the menu shell, made by the helper build)
     want=$(grep -o '"link.json": *"[0-9a-f]*"' "$builds/$newest/build.json" | grep -o '[0-9a-f]\{64\}')
-    have=$(sha256sum "$builds/$newest/link.json" 2>/dev/null | cut -c1-64)
-    if [[ -z $want || $want != "$have" ]]; then
+    have=$(sha256sum "$builds/$newest/link.json" 2>/dev/null | cut -c1-64 || true)   # empty when it is missing
+    if [[ -z $have && ${PACKAGE_WITHOUT_HELPER:-} == 1 ]]; then
+        # a pull request's test package (no private files): the helper stays the one the tester already has installed
+        echo "multiplayer helper build $newest: its helper is not in this test package (no private files)"
+    elif [[ -z $want || $want != "$have" ]]; then
         echo "The helper of build $newest is missing or is not the one its build.json names (private files out of step?)" >&2
         exit 1
+    else
+        echo "multiplayer helper build in the package: $newest"
     fi
-    echo "multiplayer helper build in the package: $newest"
     cp gow3_pc/LICENSE "$out/u3mp/patcher/LICENSE.txt"
     # u3fix.exe: the recipe steps written in C++ (the list is in tools/fixes/dctools/u3fix.cpp); the steps run it from
     # u3mp/bin, which the importer puts on PATH. Static, no DLL of ours. Without it those steps fail: stop here.
@@ -148,7 +152,7 @@ u3_import() {   # Uncharted 3's importer, its recipe and tools, and the newest m
         from_msys+=("$(cygpath -m "$objdump")")
         ldd "$objdump" | awk -v tree="$(cygpath -u "$msys/ucrt64/bin")" 'index($3, tree) == 1 {print $3}' | sort -u |
             while read -r dll; do cp "$dll" "$out/u3mp/bin/binutils/"; done
-        for dll in "$out"/u3mp/bin/binutils/*.dll; do [[ -f $dll ]] && note_msys_file ucrt64 "$dll"; done
+        for dll in "$out"/u3mp/bin/binutils/*.dll; do if [[ -f $dll ]]; then note_msys_file ucrt64 "$dll"; fi; done
     else
         echo "Note: no GNU objdump in $msys/ucrt64/bin: the multiplayer import will skip the Havok tables" >&2
     fi
@@ -247,7 +251,6 @@ qt_window() {
 texts() {
     cp tools/VERSION "$out/VERSION"   # the update check compares this with the releases
     cp tools/README-Windows.txt "$out/README.txt"
-    cp CHANGELOG.md "$out/"
     cp gow3_pc/LICENSE "$out/LICENSE.txt"
     cp tools/defaults/disabled-optimizations.txt "$out/analysis/uncharted-user/"   # what Uncharted can't take
 }

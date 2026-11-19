@@ -41,7 +41,7 @@ Good to know
   a second core; fast desktop CPUs gain nothing from it. Pair a weak graphics card with the Low
   preset. If a game hangs while loading, turn Multithreaded rendering off again. (Experimental:
   Uncharted 2 can crash with 2 frames queued.)
-- What changed in each version: CHANGELOG.md.
+- What changed in each version: the release notes on the project's GitHub Releases page.
 
 Lowest tested hardware
 - Windows 10 or 11 (64-bit); an Intel Core of the 4th generation (Haswell) or later, or any AMD
