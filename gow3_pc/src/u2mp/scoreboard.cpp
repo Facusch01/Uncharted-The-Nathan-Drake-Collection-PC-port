@@ -16,6 +16,7 @@
 
 #include "u2mp_internal.h"
 
+
 namespace u2mp {
 void install_scoreboard(int &installed);
 
@@ -32,6 +33,11 @@ constexpr uint64_t kTrackerSpeed = kTracker + 0x10;
 constexpr uint64_t kTrackerPage = kTracker + 0x18;
 constexpr uint32_t kScoreboardPage = sid("PAGE_MULTIPLAYER_SCOREBOARD");
 static_assert(kScoreboardPage == 0xf650325du, "scoreboard page id");
+constexpr uint32_t kCoopRoundPage = sid("PAGE_MULTIPLAYER_ROUND_RESULTS");
+constexpr uint32_t kCoopResultsPage = sid("PAGE_MULTIPLAYER_RESULTS");
+constexpr uint32_t kPostgamePage = sid("PAGE_MULTIPLAYER_POSTGAME");
+static_assert(kCoopRoundPage == 0x5dad5a68u && kCoopResultsPage == 0x3d437466u && kPostgamePage == 0x6b7378eau,
+              "co-op result page ids");
 
 constexpr uint64_t kPadButtons = 0x14b7fb0;
 constexpr uint32_t kDefaultMask = 0x100000;   // touchpad, the PS3 SELECT button's place
@@ -43,6 +49,14 @@ constexpr uint64_t kNgmState = 0x113b760 + 0x1e80;
 constexpr uint64_t kMenuFrames = 0x1116180 + 0x104;
 constexpr uint64_t kMenuPages = addr::menu_manager + 0x370;
 constexpr int kMenuPageSlots = 200;
+
+constexpr uint64_t kNgm = 0x113b760;
+constexpr uint64_t kGameIndex = kNgm + 0x1ca0;
+constexpr uint64_t kTaskIndex = kNgm + 0x1d6c;
+constexpr uint64_t kLookupPointer = 0xa15e70;
+constexpr uint32_t kNetGames = sid("*net-games*");
+static_assert(kNetGames == 0x3b9a067du, "net-games id");
+constexpr float kRoundResultsSeconds = 12.0f;   // gone ~8 s before the next objective message
 
 constexpr float kTick = 1.0f / 300.0f;
 static_assert(std::bit_cast<uint32_t>(kTick) == 0x3B5A740Eu, "1/300 as a float");
@@ -60,6 +74,8 @@ uint32_t button_mask = kDefaultMask;
 uint64_t previous_target = 0;   // absolute address the call reached before we took it
 
 bool shown = false;
+uint32_t active_page = kScoreboardPage;   // the page drawn at the current result screen
+bool user_shown = false;   // the player pinned the board with the button
 float fade = 0.0f;
 float speed = 1.0f;
 uint32_t previous_buttons = 0;
@@ -67,26 +83,71 @@ bool first_frame = true;
 std::chrono::steady_clock::time_point last_time;
 bool page_log_pending = true;
 
-// The scoreboard page among the menu manager's loaded pages (the list stops at the first NULL).
-unsigned char *find_page() {
+float auto_left = 0.0f;   // seconds the round/match result board stays up by itself
+float end_hold = 0.0f;    // after the match ends the game leaves at once; keep the results up
+int32_t last_task = -1;
+int32_t last_end = 0;
+
+using LookupFn = const unsigned char *(U2MP_GUEST *)(uint32_t);
+
+int32_t game_type() {
+    const auto lookup = reinterpret_cast<LookupFn>(image.base + kLookupPointer);
+    const unsigned char *table = lookup(kNetGames);
+    const int16_t game = peek_image<int16_t>(kGameIndex);
+    if (!table || game < 0) return -1;
+    const int32_t count = peek<int32_t>(table);
+    const unsigned char *records = reinterpret_cast<const unsigned char *>(peek<uint64_t>(table + 8));
+    if (!records || game >= count) return -1;
+    return peek<int32_t>(records + 0x90 * uint64_t(game) + 0x0c);
+}
+
+// How many tasks (rounds) the current net game has; -1 when unknown.
+int32_t task_count() {
+    const auto lookup = reinterpret_cast<LookupFn>(image.base + kLookupPointer);
+    const unsigned char *table = lookup(kNetGames);
+    const int16_t game = peek_image<int16_t>(kGameIndex);
+    if (!table || game < 0) return -1;
+    const int32_t count = peek<int32_t>(table);
+    const unsigned char *records = reinterpret_cast<const unsigned char *>(peek<uint64_t>(table + 8));
+    if (!records || game >= count) return -1;
+    const unsigned char *list = reinterpret_cast<const unsigned char *>(peek<uint64_t>(records + 0x90 * uint64_t(game) + 0x48));
+    return list ? peek<int32_t>(list + 8) : -1;
+}
+
+// A page among the menu manager's loaded pages (the list stops at the first NULL).
+unsigned char *find_page_id(uint32_t id) {
     for (int i = 0; i < kMenuPageSlots; ++i) {
         unsigned char *page = reinterpret_cast<unsigned char *>(peek_image<uint64_t>(kMenuPages + 8ull * i));
         if (!page) break;
-        if (peek<uint32_t>(page + 0x10) == kScoreboardPage) return page;
+        if (peek<uint32_t>(page + 0x10) == id) return page;
     }
     return nullptr;
 }
+
+unsigned char *find_page() { return find_page_id(active_page); }
 
 void set_shown(bool on, const char *reason) {
     if (on == shown) return;
     shown = on;
     poke_image<uint8_t>(kTrackerShown, on ? 1 : 0);
     if (on) {
+        poke_image<uint32_t>(kTrackerPage, active_page);
         // Make the page lay its items out again from their start positions.
         if (unsigned char *page = find_page()) poke<int32_t>(page + 0xf8, 2);
         if (page_log_pending) {
             page_log_pending = false;
             log("scoreboard: page %08x %s", kScoreboardPage, find_page() ? "found" : "NOT FOUND");
+            for (int i = 0; i < kMenuPageSlots; ++i) {
+                const unsigned char *page = reinterpret_cast<const unsigned char *>(peek_image<uint64_t>(kMenuPages + 8ull * i));
+                if (!page) break;
+                const uint32_t id = peek<uint32_t>(page + 0x10);
+                if (id == kCoopRoundPage) log("scoreboard: PAGE_MULTIPLAYER_ROUND_RESULTS loaded (slot %d)", i);
+                if (id == kCoopResultsPage) log("scoreboard: PAGE_MULTIPLAYER_RESULTS loaded (slot %d)", i);
+                if (id == kPostgamePage) log("scoreboard: PAGE_MULTIPLAYER_POSTGAME loaded (slot %d)", i);
+            }
+            int loaded = 0;
+            while (loaded < kMenuPageSlots && peek_image<uint64_t>(kMenuPages + 8ull * loaded)) ++loaded;
+            log("scoreboard: %d menu pages loaded", loaded);
         }
     }
     log("scoreboard: %s (%s)", on ? "shown" : "hidden", reason);
@@ -105,6 +166,7 @@ using RenderFn = void(U2MP_GUEST *)(void *, void *, void *);
 
 void draw_page(unsigned char *page, float alpha, float x, float y, float dt) {
     const unsigned char *vptr = reinterpret_cast<const unsigned char *>(peek<uint64_t>(page));
+    if (!vptr || !peek<uint64_t>(vptr + 0x10) || !peek<uint64_t>(vptr + 0x18)) return;
 
     UpdateArgs args{uint64_t(uintptr_t(image.base + addr::menu_manager)), 0, dt};
     reinterpret_cast<UpdateFn>(peek<uint64_t>(vptr + 0x10))(page, &args);
@@ -158,19 +220,61 @@ U2MP_GUEST uint64_t frame_hook(uint64_t a, uint64_t b, uint64_t c) {
     last_time = now;
 
     const bool playing = peek_image<int32_t>(kNetState) > 1 && peek_image<int32_t>(kNgmState) == 2;
+
     const uint32_t buttons = peek_image<uint32_t>(kPadButtons);
     const bool pressed = (buttons & ~previous_buttons & button_mask) != 0;
     previous_buttons = buttons;
 
-    if (!playing) {
+    // Between rounds of co-op arena the task index moves on; hold the board up for a few seconds.
+    // At the end of the match hold it until the results state takes over.
+    if (playing) {
+        const int32_t type = game_type();
+        const int32_t task = peek_image<int32_t>(kTaskIndex);
+        const int32_t end = peek_image<int32_t>(kNgm + 0x1e84);
+        if (type == 8 || type == 9 || type == 12) {
+            if (last_task >= 0 && task != last_task && end == 0 && auto_left <= 0.0f) {
+                active_page = kScoreboardPage;
+                const bool round_page = find_page_id(kCoopRoundPage) != nullptr;
+                active_page = round_page ? kCoopRoundPage : kScoreboardPage;
+                auto_left = kRoundResultsSeconds;
+                log("scoreboard: round results page %08x %s", active_page, round_page ? "selected" : "missing");
+            }
+            if (last_end == 0 && end != 0 && !(auto_left > 0.0f && active_page == kCoopResultsPage)) {
+                last_end = end;
+                // The match results page is the final scoreboard (Mission Completed, money, medals).
+                const bool results = find_page_id(kCoopResultsPage) != nullptr;
+                active_page = results ? kCoopResultsPage : kScoreboardPage;
+                auto_left = kRoundResultsSeconds;
+                end_hold = kRoundResultsSeconds;
+                log("scoreboard: match results page %08x %s", active_page, results ? "selected" : "missing");
+            }
+        }
+        last_task = last_end == 0 ? task : -1;
+    } else if (end_hold > 0.0f) {
+        end_hold -= dt;   // match over, the game is leaving: let the results board finish
+    } else {
+        auto_left = 0.0f;
+        last_task = -1;
+        last_end = 0;
+    }
+    if (auto_left > 0.0f) auto_left -= dt;
+
+    if (!playing && end_hold <= 0.0f) {
+        shown = false;
+        user_shown = false;
         set_shown(false, "not playing");
     } else if (pressed) {
         speed = 2.0f;
         poke_image<float>(kTrackerSpeed, 2.0f);
-        set_shown(!shown, "button");
+        user_shown = !(user_shown || auto_left > 0.0f);
+        auto_left = 0.0f;
     }
 
-    fade += (shown ? dt : -dt) * speed;
+    const bool want = user_shown || auto_left > 0.0f;
+    const char *reason = want ? (auto_left > 0.0f ? "round results" : "button")
+                              : (user_shown ? "button" : "round results");
+    set_shown(want, reason);
+    fade += (want ? dt * 4.0f : -dt * 2.0f);
     if (fade < 0.0f) fade = 0.0f;
     if (fade > 1.0f) fade = 1.0f;
     poke_image<float>(kTrackerFade, fade);
@@ -180,8 +284,8 @@ U2MP_GUEST uint64_t frame_hook(uint64_t a, uint64_t b, uint64_t c) {
     if (!page) return result;
 
     // Slide in from below when showing, out upwards when hiding.
-    const float ease = shown ? fade * fade : 1.0f - (1.0f - fade) * (1.0f - fade);
-    const float y = (1.0f - ease) * (shown ? 20.0f : -20.0f);
+    const float ease = want ? fade * fade : 1.0f - (1.0f - fade) * (1.0f - fade);
+    const float y = (1.0f - ease) * (want ? 20.0f : -20.0f);
     draw_page(page, fade, 0.0f, y, dt);
     return result;
 }

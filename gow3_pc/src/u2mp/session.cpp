@@ -822,6 +822,7 @@ void check_net_package() {
 }
 
 void frame_work() {
+    scan_type_vtables();
     if (active || clock_object) update_net_clock();
     online::frame();
     if (!active) return;
@@ -888,6 +889,12 @@ void frame_work() {
         // Back from a left match to the lobby: the host create page must wait for a new room.
         if (hosting && s == 3 && last_sm == 35) g(kMatchSession)[0x99] = 0;
         last_sm = s;
+    }
+
+    static bool logged_load_level = false;
+    if (!logged_load_level && g(kMatchSession)[0xb54]) {
+        logged_load_level = true;
+        log("online: NetEventLoadLevel applied (match+0xb54), %s", hosting ? "host" : "client");
     }
 }
 
@@ -1071,6 +1078,24 @@ int64_t steady_ms() {
     return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
 }
 
+// WaitReady only leaves once every player slot has signalled in, so show what each slot reports.
+void wait_ready_diagnostics() {
+    static int64_t next = 0;
+    const int64_t ms = steady_ms();
+    if (ms < next) return;
+    next = ms + 2000;
+    uint8_t *base = ngm();
+    const uint64_t end = get<uint64_t>(base) - 0x10;
+    log("wait ready: all ready %u, deadline %d, timer %d, end 0x%llx", unsigned(base[0x151]),
+        get<int32_t>(base + 0x154), get<int32_t>(g(0x113a040) + 0xc), (unsigned long long)end);
+    for (int i = 0; i < 10; ++i) {
+        uint8_t *slot = base + 0x2c0 * i;
+        if (reinterpret_cast<uint64_t>(slot) == end) break;
+        log("wait ready: slot %d id %d in game %u, %02x %02x, state %d", i, get<int32_t>(slot + 8),
+            unsigned(slot[0x30]), unsigned(slot[0x27c]), unsigned(slot[0x284]), get<int32_t>(slot + 0x2c));
+    }
+}
+
 uint64_t state_update(int index, void *state) {
     int64_t ms = steady_ms();
     bool changed = last_state != index;
@@ -1080,6 +1105,7 @@ uint64_t state_update(int index, void *state) {
         log("online state: update 0x%llx (vtable slot 0x%llx)", (unsigned long long)kStates[index].original,
             (unsigned long long)(kStates[index].slot - 0x18));
         if (index == kLoadLevels) load_levels_diagnostics(static_cast<uint8_t *>(state));
+        if (index == kWaitReady) wait_ready_diagnostics();
         if (index == kLeave) leave_reason("leave");
     }
     if (index == kLoadLevels) missing_level_package();

@@ -173,13 +173,35 @@ template <typename Fn> Fn virtual_slot(const uint8_t *object, unsigned slot) {
 }
 
 // ---- the natives --------------------------------------------------------------------------------
-U2MP_GUEST uint64_t net_coop_host_script_id(int, const uint64_t *) { return task_id_field(0x1c); }
+U2MP_GUEST uint64_t net_coop_host_script_id(int, const uint64_t *) {
+    const uint32_t id = task_id_field(0x1c);
+    static uint32_t last = 0xffffffffu;
+    if (id != last) {
+        last = id;
+        log("natives: net-coop-host-script-id -> %08x", id);
+    }
+    return id;
+}
 
-U2MP_GUEST uint64_t net_coop_script_id(int, const uint64_t *) { return task_id_field(0x20); }
+U2MP_GUEST uint64_t net_coop_script_id(int, const uint64_t *) {
+    const uint32_t id = task_id_field(0x20);
+    static uint32_t last = 0xffffffffu;
+    if (id != last) {
+        last = id;
+        log("natives: net-coop-script-id -> %08x", id);
+    }
+    return id;
+}
 
 U2MP_GUEST uint64_t net_coop_task(int, const uint64_t *) {
     const uint8_t *task = current_task(task_list_of(current_net_game()));
-    return task ? peek<uint32_t>(task) : 0;
+    const uint32_t id = task ? peek<uint32_t>(task) : 0;
+    static uint32_t last = 0xffffffffu;
+    if (id != last) {
+        last = id;
+        log("natives: net-coop-task -> %08x (a co-op wave script is running)", id);
+    }
+    return id;
 }
 
 U2MP_GUEST uint64_t net_player_coop_id(int, const uint64_t *) {

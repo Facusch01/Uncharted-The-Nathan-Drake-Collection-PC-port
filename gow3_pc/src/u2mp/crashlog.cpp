@@ -33,6 +33,34 @@ void where(char *out, size_t size, uint64_t address) {
 LPTOP_LEVEL_EXCEPTION_FILTER previous = nullptr;
 volatile LONG reported = 0;
 
+// The fault itself, unwound from the exception's own context: the stack scan only finds stray
+// pointers, so without this the report cannot name the caller of a fault inside a CRT routine.
+void frames(const CONTEXT *ctx) {
+    CONTEXT c = *ctx;
+    char at[160];
+    const uint64_t base = uint64_t(uintptr_t(image.base));
+    for (int i = 0; i < 32 && c.Rip; ++i) {
+        where(at, sizeof at, c.Rip);
+        std::fprintf(stdout, "u2mp:   #%d %s\n", i, at);
+        if (c.Rip >= base && c.Rip < base + image.size) break;   // guest frame: no host unwind data
+        DWORD64 module = 0;
+        PRUNTIME_FUNCTION entry = RtlLookupFunctionEntry(c.Rip, &module, nullptr);
+        if (!entry) {                                            // leaf: the return address is on the stack
+            const uint64_t *sp = reinterpret_cast<const uint64_t *>(c.Rsp);
+            MEMORY_BASIC_INFORMATION m;
+            if (!VirtualQuery(sp, &m, sizeof m) ||
+                uint64_t(uintptr_t(sp)) + sizeof(uint64_t) > uint64_t(uintptr_t(m.BaseAddress)) + m.RegionSize)
+                break;
+            c.Rip = *sp;
+            c.Rsp += sizeof(uint64_t);
+            continue;
+        }
+        PVOID handler_data = nullptr;
+        DWORD64 frame = 0;
+        RtlVirtualUnwind(UNW_FLAG_NHANDLER, module, c.Rip, entry, &c, &handler_data, &frame, nullptr);
+    }
+}
+
 void report(EXCEPTION_POINTERS *info);
 
 LONG WINAPI last_chance(EXCEPTION_POINTERS *info) {
@@ -75,8 +103,13 @@ void report(EXCEPTION_POINTERS *info) {
     int shown = 0;
     MEMORY_BASIC_INFORMATION mbi;
     const uint64_t *sp = reinterpret_cast<const uint64_t *>(uintptr_t(c->Rsp));
+    frames(c);
+    std::fprintf(stdout, "u2mp:   stack:");
     if (VirtualQuery(sp, &mbi, sizeof mbi)) {
         const uint64_t *end = reinterpret_cast<const uint64_t *>(uintptr_t(mbi.BaseAddress) + mbi.RegionSize);
+        for (const uint64_t *p = sp; p < end && p < sp + 12; ++p)
+            std::fprintf(stdout, " %llx", (unsigned long long)*p);
+        std::fprintf(stdout, "\n");
         for (const uint64_t *p = sp; p < end && p < sp + 4096 && shown < 24; ++p) {
             const uint64_t v = *p;
             const bool guest = v >= base && v < base + image.size;

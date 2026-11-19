@@ -70,6 +70,12 @@ void send_peer(uint8_t slot, Peer &peer, double now) {
     const bool queued = field<uint64_t>(M, M_RELIABLE_HEAD) || field<uint64_t>(M, M_UNRELIABLE_HEAD);
     const bool inflight = field<uint64_t>(M, M_INFLIGHT_HEAD) != 0;
     if (now < peer.next_send || (!queued && !inflight && now - peer.last_send < kIdleInterval)) return;
+    static bool logged_queued = false;
+    if (queued && !logged_queued) {
+        logged_queued = true;
+        log("game transport: first packet with queued events, slot %u reliable %s unreliable %s", unsigned(slot),
+            field<uint64_t>(M, M_RELIABLE_HEAD) ? "yes" : "no", field<uint64_t>(M, M_UNRELIABLE_HEAD) ? "yes" : "no");
+    }
     std::vector<uint32_t> words(kMaxBits / 32 + 64, 0);   // zeroed: the game's writes OR into words
     BitStream bs{words.data(), 0, kMaxBits + 32 * 32, 0};
     write_bits(bs, 0, 8);
@@ -128,7 +134,14 @@ void receive_peer(Peer &peer, const uint8_t *data, size_t size, double now) {
     else if (int32_t(full_seq - recv_seq) > 1024) full_seq -= 0x800;
     uint32_t full_ack = (next_seq & ~0x3ffu) | ack;
     if (int32_t(full_ack - next_seq) > 0) full_ack -= 0x400;
-    if (int32_t(full_seq - recv_seq) > 31 || int32_t(full_ack - next_seq) > 0) return;   // "Ignoring Packet"
+    if (int32_t(full_seq - recv_seq) > 31 || int32_t(full_ack - next_seq) > 0) {
+        static bool logged_refused = false;
+        if (!logged_refused) {
+            logged_refused = true;
+            log("game transport: ignoring a packet, seq %u (have %u) ack %u (next %u)", seq, recv_seq, ack, next_seq);
+        }
+        return;   // "Ignoring Packet"
+    }
     const bool fresh = int32_t(full_seq - recv_seq) > 0;
     if (fresh) {
         const uint32_t shift = full_seq - recv_seq;
@@ -151,7 +164,18 @@ void receive_peer(Peer &peer, const uint8_t *data, size_t size, double now) {
         acked_seq = full_ack;
     }
     field<float>(M, M_LAST_RECV) = float(now);
-    if (fresh && has_messages) fn.read(reinterpret_cast<void *>(M), &bs);
+    static bool logged_recv = false, logged_messages = false;
+    if (!logged_recv) {
+        logged_recv = true;
+        log("game transport: first packet accepted, record %d, seq %u, messages %u", peer.record, full_seq, has_messages);
+    }
+    if (fresh && has_messages) {
+        if (!logged_messages) {
+            logged_messages = true;
+            log("game transport: first message packet unpacked, seq %u, %u bytes", full_seq, unsigned(size));
+        }
+        fn.read(reinterpret_cast<void *>(M), &bs);
+    }
 }
 
 }  // namespace
