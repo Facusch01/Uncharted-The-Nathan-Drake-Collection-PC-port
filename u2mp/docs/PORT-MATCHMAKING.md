@@ -352,6 +352,12 @@ PS4 `0x5eb830` kept steps 1 except CreateJoinRoom (no Matching2 import), and `0x
    With a party: leader -> 12 WAIT_FOR_PARTY_HOST_JOIN / 10 (members follow, section 3.4).
 4. CLIENT_LOBBY: PAGE_LOBBY `0x443bc8` (PS4 `0x5ebac0`, intact). The host's NetEventLoadLevel moves it
    on (PS4 client wait `0x609d00`).
+   Host side of that event: `0x440f90` walks the ten NGM slots (`ngm+0x28 + i*0x270`, `+0x18` valid,
+   `+0x118` net id, `+0x140`/`+0x23d` ready, `+0x234` excluded) and sends once every slot is ready:
+   `0x489d4c` builds type 2 and `0x493728(ngm, event, -1)` delivers it. That delivery resolves each
+   slot's connection id (`slot+0x204`) with `0x4e8848` (32 records of `0x1cc` from manager+8, matched on
+   `record+0`); a slot whose id does not resolve gets no event. Applying it sets `match+0xb54` (PS4
+   `0x63b6b0`), which the client's `0x609d00` consumes to run the match task.
 
 ### 3.3 Matchmaking (PAGE_MULTIPLAYER_MATCHMAKING `0x4b0a58` = PS4 `0x64e910` ret; ported for parties by frontend3.cpp)
 

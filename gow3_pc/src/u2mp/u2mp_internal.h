@@ -66,7 +66,8 @@ void install_frontend2(int &installed); // frontend2.cpp: partial menu functions
 void install_frontend6(int &installed); // frontend6.cpp: "Starting in" popup, vote level preload (PORT-FRONTEND6.md)
 void install_netanim(int &installed);   // netanim.cpp: snapshot clip phases + NetAnimCmdGenerator slot 4, PS3 0x453c10 (PORT-NETANIM.md)
 void install_frontend3(int &installed); // frontend3.cpp: matchmaking, vote, leader back-out (PORT-FRONTEND3.md)
-void install_spawn(int &installed);     // spawn.cpp: spawner lookup at match start (PORT-SPAWN.md)
+void install_spawn(int &installed); // spawn.cpp: spawner lookup at match start (PORT-SPAWN.md)
+//void scan_type_vtables();        // spawn.cpp: find the per-type update pointers in the image
 void install_gameplay2(int &installed); // gameplay2.cpp: connection event Applies (PORT-GAMEPLAY2.md)
 void install_visibility(int &installed); // visibility.cpp: PS3 KickVisibilityJob 0x494c38 (PORT-GAMEPLAY3.md 7)
 void install_scripttime(int &installed); // scripttime.cpp: net-timer track-group delta (PORT-SCRIPTTIME.md)

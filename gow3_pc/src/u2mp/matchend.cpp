@@ -15,6 +15,8 @@
 
 #include "u2mp_internal.h"
 
+extern "C" int runtime_memory_is_mapped(uintptr_t address, uint64_t size);
+
 namespace u2mp {
 void install_matchend(int &installed);
 void visibility_kick();
@@ -136,6 +138,27 @@ void arena_log(int32_t type) {
         type, task_index, task_count, task_id, task_host, task_script, peek_image<int32_t>(kNpcSequence),
         peek_image<int32_t>(kNpcTrackers), peek_image<uint8_t>(kNetFlag), active_players(),
         peek_image<int32_t>(kExpectedPlayers), peek_image<int32_t>(kNgmState));
+    if (type == 12) {
+        const unsigned char *ngm = image.base + kNgm;
+        const int32_t handles = peek<int32_t>(ngm + 0x1dd0);
+        log("siege zones: handles %d, list 0x%llx", handles, (unsigned long long)peek<uint64_t>(ngm + 0x1d80));
+        const uint64_t entry = peek<uint64_t>(ngm + 0x1d80);
+        if (handles > 0 && entry && entry >= 0x1000000000ull && runtime_memory_is_mapped(entry, 8)) {
+            const uint64_t zone = *reinterpret_cast<const uint64_t *>(entry);
+            log("siege zone: entry 0x%llx zone 0x%llx", (unsigned long long)entry, (unsigned long long)zone);
+            if (zone && runtime_memory_is_mapped(zone, 0x260)) {
+                log("siege zone: vtable 0x%llx id %08x team %d", (unsigned long long)(*reinterpret_cast<const uint64_t *>(zone) - uintptr_t(image.base)),
+                    *reinterpret_cast<const uint32_t *>(zone + 0x44), *reinterpret_cast<const int32_t *>(zone + 0x250));
+                for (uint64_t off = 0; off < 0x800; off += 8) {
+                    const uint64_t p = *reinterpret_cast<const uint64_t *>(zone + off);
+                    if (p < 0x1000000000ull || p >= 0x1bad00000ull || (p & 7)) continue;
+                    if (!runtime_memory_is_mapped(p, 8)) continue;
+                    if (*reinterpret_cast<const uint64_t *>(p) != uintptr_t(image.base) + 0xff90d0) continue;
+                    log("siege zone: wave manager 0x%llx at +0x%llx", (unsigned long long)p, (unsigned long long)off);
+                }
+            }
+        }
+    }
 }
 
 void condition_log(const char *reason) {
