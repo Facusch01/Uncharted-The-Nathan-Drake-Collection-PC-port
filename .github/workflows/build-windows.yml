@@ -101,6 +101,18 @@ jobs:
           export MSYS2_ROOT=$(cygpath -u '${{ steps.msys2.outputs.msys2-location }}')
           tools/package_windows.sh
 
+      # A pull request (or a run started by hand): the package as a download for testing, kept 7 days. The trigger
+      # stays pull_request, so code from a fork never gets the private package files' secrets; a fork's pull request
+      # builds without them.
+      - name: Package for testing
+        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Uncharted-windows-pr${{ github.event.pull_request.number || github.run_number }}
+          path: dist/Uncharted-windows.zip
+          if-no-files-found: error
+          retention-days: 7
+
       # A release: the tag has to equal tools/VERSION (the launcher's updates compare the two). 0.x releases say
       # "beta" in their title but are full releases, so the repository page shows them as the latest; GitHub
       # records the zip's SHA-256, which the launcher checks before installing.
