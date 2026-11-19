@@ -2,7 +2,7 @@
 name: Bug report
 about: If something doesn't work correctly
 title: "[Bug] - Enter a title here"
-labels: bug
+labels: bug, enhancement
 assignees: ''
 type: Bug
 
