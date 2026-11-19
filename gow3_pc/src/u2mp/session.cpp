@@ -822,7 +822,7 @@ void check_net_package() {
 }
 
 void frame_work() {
-    scan_type_vtables();
+    // scan_type_vtables();   // off for now: the type-vtable scan and dump are a debugging aid (PR 21)
     if (active || clock_object) update_net_clock();
     online::frame();
     if (!active) return;
