@@ -372,6 +372,32 @@ bool vc_only(const std::vector<std::string> &L) {
 
 using Refs = std::vector<Ps3Programs::Ref_>;
 
+// Sampler unit 0 belongs to the blend-factor source. Usually that is a blend map of its own, the last reference. When the
+// factor is a channel of a colour layer's texture, unit 0 also samples that layer's colour. The PS3 layer blend is
+// 'ADD d.xyz, c1, -c2' then 'MAD x.xyz, f, d, c2' (factor 1 = layer 1, as retail binds it): when unit 0's colour is the
+// c1 term, unit 0 is layer 1, the first reference (Gompa's Garuda statue: blend from the statue texture, moss on layer 2)
+bool unit0_layer1(const std::vector<std::string> &L) {
+    std::vector<Op> P;
+    for (const std::string &l : L) P.push_back(parse_op(l));
+    auto tex_of = [&](const std::string &x, int before) -> std::optional<int> {
+        const auto j = writer(P, base(x), "x", before);
+        if (!j || *j < 0) return std::nullopt;
+        const Op &o = P[size_t(*j)];
+        if (!starts(o.op, "TEX") || o.d.find('.') == std::string::npos || dot1(o.d) != "xyz") return std::nullopt;
+        return tex_unit(o.l);
+    };
+    for (size_t k = 0; k < P.size(); k++) {
+        const Op &o = P[k];
+        if (o.op != "ADD" || !ends(o.d, ".xyz") || o.a.size() != 2 || starts(o.a[0], "-") || !starts(o.a[1], "-")) continue;
+        const std::string c2 = o.a[1].substr(1);
+        const auto a = tex_of(o.a[0], int(k)), b = tex_of(c2, int(k));
+        if (!a || !b || *a != 0 || *b == 0) continue;
+        for (size_t m = k + 1; m < P.size(); m++)
+            if (P[m].op == "MAD" && P[m].a.size() == 3 && base(P[m].a[1]) == base(o.d) && base(P[m].a[2]) == base(c2)) return true;
+    }
+    return false;
+}
+
 std::optional<std::map<int, size_t>> unit_map(const Refs &nref, const std::vector<std::string> &L) {
     std::set<int> used;
     for (const std::string &l : L)
@@ -389,9 +415,11 @@ std::optional<std::map<int, size_t>> unit_map(const Refs &nref, const std::vecto
     for (size_t k = 0; k < idx[0]; k++) S.push_back(k);
     if (S.size() != U.size()) return std::nullopt;
     std::vector<int> order;
+    const bool first0 = unit0_layer1(L);
+    if (first0) order.push_back(0);
     for (int x : U)
         if (x) order.push_back(x);
-    if (std::find(U.begin(), U.end(), 0) != U.end()) order.push_back(0);
+    if (!first0 && std::find(U.begin(), U.end(), 0) != U.end()) order.push_back(0);
     std::map<int, size_t> um;
     for (size_t k = 0; k < order.size(); k++) um.emplace(order[k], S[k]);
     static const std::regex T(R"(^TEX\w* \w+\.(\w+),.*tex(\d+)$)"), COL("color|detail|reflection|env");
@@ -790,9 +818,11 @@ std::map<std::string, std::set<std::string>> texture_coords(Ps3Programs &P, cons
     for (size_t k = 0; k < idx[0]; k++) S.push_back(k);
     if (S.size() != used.size()) return out;
     std::vector<int> order;
+    const bool first0 = unit0_layer1(L);   // unit 0 = layer 1's colour (see unit0_layer1)
+    if (first0) order.push_back(0);
     for (int x : used)
         if (x) order.push_back(x);
-    if (used.count(0)) order.push_back(0);
+    if (!first0 && used.count(0)) order.push_back(0);
     std::map<int, size_t> um;
     for (size_t k = 0; k < order.size(); k++) um.emplace(order[k], S[k]);
     static const std::regex T(R"(^TEX\w* [^,]+, (-?)(f\[(TEX\d)\](\.(\w+))?|[^,]+), tex(\d+)$)");
@@ -809,6 +839,74 @@ std::map<std::string, std::set<std::string>> texture_coords(Ps3Programs &P, cons
         out[nref[ui->second].full].insert(c);
     }
     return out;
+}
+
+// the main-pass vertex program of each material raises a vertex input to a power: 'LG2 r, v[n]' (then EX2 of r times
+// a constant). U3's layer-blend vertex programs do that to the vertex colour, the exponent being the material's blend
+// offset (g_blendSoftness_blendOffset_linearBlendOffset y), when it is not 1
+bool vc_blend_pow(Ps3Programs &P, const std::string &name) {
+    if (!P.vcpow) {
+        P.vcpow.emplace();
+        const Pak &p = P.p;
+        const auto mts = p.items_of("MATERIAL_TABLE_1");
+        if (!mts.empty()) {
+            const uint32_t pg = mts[0].page;
+            const uint64_t b = mts[0].data_off();
+            const uint32_t nmat = p.pu32(pg, b + 0xc);
+            const ORef ma = bg::res(p, pg, b + 0x20), sr = bg::res(p, pg, b + 0x1c);
+            for (uint32_t i = 0; i < nmat && ma && sr; i++) {
+                try {
+                    const Ref m = bg::need(p, ma->first, ma->second + 4 * i);
+                    const Ref nmr = bg::need(p, m.first, m.second);
+                    const std::string nm = p.pstr(nmr.first, nmr.second);
+                    const ORef pl = bg::res(p, m.first, m.second + 0x10);
+                    std::optional<Ref> node;
+                    for (uint32_t k = 0; pl && k < 8 && !node; k++) {
+                        const ORef ps = bg::res(p, pl->first, pl->second + 4 * k);
+                        if (!ps || p.pu32(ps->first, ps->second) != 0) continue;
+                        if (const ORef nd = bg::res(p, ps->first, ps->second + 0x10)) node = *nd;
+                    }
+                    if (!node) continue;
+                    const uint32_t pid = bg::be16(p, p.pbase(node->first) + node->second);
+                    const ORef vp = bg::res(p, sr->first, sr->second + 0x10ull * pid + 8);
+                    if (!vp) continue;
+                    const uint64_t V = p.pbase(vp->first) + vp->second;
+                    if (V + 0x20 > p.d.size()) continue;
+                    const uint32_t ninst = be32(p.d, V) >> 16, coff = be32(p.d, V + 16);
+                    for (uint32_t n = 0; n < ninst + 4; n++) {
+                        const uint64_t a = V + coff + 16ull * n;
+                        if (a + 16 > p.d.size()) break;
+                        const uint32_t d1 = be32(p.d, a + 4), d2 = be32(p.d, a + 8), d3 = be32(p.d, a + 12);
+                        const uint32_t sop = (d1 >> 27) & 0x1f, s2 = ((d2 & 0x3f) << 11) | (d3 >> 21);
+                        if (sop == 13 && (s2 & 3) == 2) {   // LG2 of a vertex input
+                            P.vcpow->insert(nm);
+                            break;
+                        }
+                        if (d3 & 1) break;   // end of program
+                    }
+                } catch (const std::exception &) {
+                }
+            }
+        }
+    }
+    return P.vcpow->count(name) != 0;
+}
+
+// a hard-edge layer blend: 'MAD_SAT f, t.c, {100}, v' with t written by a texture read of one channel. The soft programs
+// compute f = sat(v + t.c / (2s + 0.01)); with s = 0 that is the same f = sat(100 t.c + v)
+bool hard_blend(Ps3Programs &P, const std::string &name) {
+    if (!P.table) build_table(P);
+    auto e = P.table->find(name);
+    if (e == P.table->end()) return false;
+    std::vector<Op> L;
+    for (const std::string &l : e->second.first) L.push_back(parse_op(l));
+    for (size_t k = 0; k < L.size(); k++) {
+        const Op &o = L[k];
+        if (o.op != "MAD_SAT" || o.a.size() != 3 || kval(o.a[1]) != 100.0 || starts(o.a[0], "-") || o.a[0].find('.') == std::string::npos) continue;
+        const auto j = writer(L, base(o.a[0]), dot1(o.a[0]).substr(0, 1), int(k));
+        if (j && *j >= 0 && starts(L[size_t(*j)].op, "TEX") && tex_unit(L[size_t(*j)].l)) return true;
+    }
+    return false;
 }
 
 }  // namespace u3::fp

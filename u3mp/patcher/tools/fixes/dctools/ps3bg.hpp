@@ -104,6 +104,7 @@ struct Material3 {
     // 0x80800000): 1; it culls back faces (bit set): 0; -1 unknown. Retail PS4 agrees on the exact twins (321 of 322
     // two-sided PS3 materials are GLOBAL_2SIDED on PS4, none of 4816 one-sided ones)
     int two_sided = -1;
+    int64_t state0 = -1;   // the first pass node's state word (+0x20), -1 unknown
 };
 struct Texture3 {
     std::string name;

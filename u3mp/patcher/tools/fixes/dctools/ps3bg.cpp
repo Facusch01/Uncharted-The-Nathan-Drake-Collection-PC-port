@@ -557,6 +557,7 @@ void read_materials(const Pak &p, std::vector<Material3> &out, std::vector<Textu
                 // the first pass node blends (bit 0x02000000: 0xf2800000 / 0xf3800000): the material draws alpha-blended. Retail
                 // PS4 agrees on every exact twin: a pass-0 blend bit is TRANSPARENCY_ALPHA_BLEND, no bit never is
                 if (k == 0) mat.blend = (p.pu32(nd->first, nd->second + 0x20) & 0x02000000u) ? 1 : 0;
+                if (k == 0) mat.state0 = int64_t(p.pu32(nd->first, nd->second + 0x20));
                 // the first pass node culls back faces (bit 0x01000000) or draws both (clear: foliage, cloth, reed mats)
                 if (mat.two_sided < 0) mat.two_sided = (p.pu32(nd->first, nd->second + 0x20) & 0x01000000u) ? 0 : 1;
             }
@@ -564,6 +565,7 @@ void read_materials(const Pak &p, std::vector<Material3> &out, std::vector<Textu
             mat.alpha_test = -1;
             mat.blend = -1;
             mat.two_sided = -1;
+            mat.state0 = -1;
         }
         if (!exact.empty()) mat.textures = exact;
         else {

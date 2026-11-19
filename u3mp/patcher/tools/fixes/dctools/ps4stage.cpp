@@ -1033,6 +1033,7 @@ Bytes convert_once(const Pak &p, const std::string &stage, const Plan &plan, con
     std::optional<std::map<std::string, std::vector<std::string>>> own_leak;
     std::optional<bool> detail_leak;
     std::map<std::string, double> soft_override;
+    std::map<std::string, double> vc_pow;   // material -> exponent of its vertex colour (see the blend offset rule)
     std::set<std::string> ov_uvscale2;   // materials whose PS3 overlay pair sits on a template overlay with a scaled UV 2
     fp::Ps3Programs progs(p);
     // noodler waterfall sheets: the PS3 waterfall vertex program passes vertex colour blue on, and its fragment program
@@ -1308,6 +1309,19 @@ Bytes convert_once(const Pak &p, const std::string &stage, const Plan &plan, con
                                                           std::nullopt, true);
                     if (einv) bd.e = einv;
                 }
+            // a hard-edge PS3 layer blend (f = sat(100 map + v), no softness divide: the 'hardedge' / rubble / rough-wood
+            // programs, whose retail twins have no BLEND_FACTOR_SOFTNESS) on a template with a softness: softness 0, the
+            // same hard edge. The template default (1) or the PS3 constant the program does not use (Gompa's rubble slab
+            // 0.06) mixed both layers into a pale grey where PS3 shows the dark rubble layer
+            if (opt.fixes && has_feat("BLEND_FACTOR_USE_BLEND_MAP_AND_VERTEX_COLOR") && has_feat("BLEND_FACTOR_SOFTNESS") && fp::hard_blend(progs, n))
+                soft_override[n] = 0.0;
+            // the PS3 layer-blend vertex program raises the vertex colour to the material's blend offset when that is not 1
+            // (the retail twins of such materials carry BLEND_FACTOR_OFFSET); on a template without that feature the vertex
+            // colour is written raised to it (Gompa's Garuda statue, offset 1.54: unraised, its moss layer hid the carving)
+            if (opt.fixes && has_feat("BLEND_FACTOR_USE_BLEND_MAP_AND_VERTEX_COLOR") && !has_feat("BLEND_FACTOR_OFFSET") && fp::vc_blend_pow(progs, n))
+                if (const std::vector<double> *bo = bg::param(pe->ps3params, "g_blendSoftness_blendOffset_linearBlendOffset");
+                    bo && bo->size() >= 2 && (*bo)[1] > 0 && (*bo)[1] != 1.0)
+                    vc_pow[n] = (*bo)[1];
             if ((opt.sky || opt.fixes) && has_feat("BLEND_FACTOR_USE_BLEND_MAP_AND_VERTEX_COLOR"))
                 for (auto &bd : mw.binds) {
                     if (bd.param != "g_tNdFetchBlendMap" || !bd.e || !has(bd.e->full, "generated/u3mp/flat-")) continue;
@@ -1716,6 +1730,12 @@ Bytes convert_once(const Pak &p, const std::string &stage, const Plan &plan, con
                     for (auto &[aid, m] : blocks.back().attrs)
                         if (aid == 0x15 && m.cols >= 3)
                             for (size_t i = 0; i < m.rows; i++) m.at(i, 2) = std::min(1.0, m.at(i, 2) / nb->second);
+            if (pr.mats[bi])   // a blend vertex colour the PS3 program raises to the blend offset (see vc_pow)
+                if (auto vp = vc_pow.find(*pr.mats[bi]); vp != vc_pow.end())
+                    for (auto &[aid, m] : blocks.back().attrs)
+                        if (aid == 0x15)
+                            for (size_t i = 0; i < m.rows; i++)
+                                for (size_t c = 0; c < std::min<size_t>(3, m.cols); c++) m.at(i, c) = std::pow(std::max(0.0, m.at(i, c)), vp->second);
         }
         bool skinned = njoints > 0;
         for (const Block &b : blocks) skinned = skinned && b.has_skin;
@@ -1754,6 +1774,19 @@ Bytes convert_once(const Pak &p, const std::string &stage, const Plan &plan, con
                 approx();
                 continue;
             }
+            // U3 waterfall ribbons PS3 never shows (Gompa's Garuda falla, Museum's waterfall and drain, Shambhala's
+            // waterfall shoots): the first technique pass neither writes depth nor blends (state word bits 0x08000000 /
+            // 0x02000000 clear: 0xf0800000) and the blocks carry no normals (position and uv only). Every other PS3 surface
+            // has one of the two bits or normals. Such a group keeps its submesh, every triangle degenerate (its first
+            // corner three times, as the emblem walls do): same layout, nothing drawn
+            bool ribbon = false;
+            if (!g_u2 && opt.fixes)
+                if (auto mi = m3.find(g.mat); mi != m3.end() && mi->second->state0 >= 0 && !(mi->second->state0 & 0x0A000000)) {
+                    ribbon = true;
+                    for (uint32_t b = g.first; b < g.first + g.count && ribbon; b++)
+                        for (const auto &[aid, m_] : blocks.at(b).attrs) ribbon = ribbon && aid != 2;
+                }
+            if (ribbon) approx();
             for (uint32_t c0 = g.first; c0 < g.first + g.count; c0 += MAX_BLOCKS) {
                 Submesh rec;
                 for (uint32_t b = c0; b < std::min(g.first + g.count, c0 + MAX_BLOCKS); b++) rec.chunk.push_back(b);
@@ -1772,7 +1805,7 @@ Bytes convert_once(const Pak &p, const std::string &stage, const Plan &plan, con
                         const auto &tr = b->tris[ti];
                         // an emblem triangle stays as a degenerate one (its first corner three times): same counts and
                         // layout as without the emblem walls, nothing drawn
-                        const std::array<uint32_t, 3> t3 = emblem && drop[ti] ? std::array<uint32_t, 3>{tr[0], tr[0], tr[0]} : tr;
+                        const std::array<uint32_t, 3> t3 = (emblem && drop[ti]) || ribbon ? std::array<uint32_t, 3>{tr[0], tr[0], tr[0]} : tr;
                         for (uint32_t v : t3) {
                             const uint64_t x = uint64_t(v) + base;
                             if (x > 0xffff) throw Stop("OverflowError: index out of bounds for uint16");
@@ -1825,6 +1858,18 @@ Bytes convert_once(const Pak &p, const std::string &stage, const Plan &plan, con
                 }
                 // no lightmaps: the per-instance writer drops the lightmap-uv stream, so the defaults must too
                 if (lm_entries.empty()) iorder.erase(std::remove(iorder.begin(), iorder.end(), 0x13), iorder.end());
+                // U3: every retail prime-shader submesh but the shadow blockers carries the per-instance light (0x4c, slot 8)
+                // and instance constant (0x4e, slot 255) streams, zero by default (1186 of 1267 in six retail paks; the 81
+                // without are lib-shadowblocker / general/shadowblocker). A PS3 block without those attributes (the
+                // waterfall sheets of Sanctuary, Museum, Shambhala, Gompa) got none, and its prime-shader draw had no
+                // instance streams to read: the sheets drew as a thin line. Such a submesh gets the two streams with zeros
+                if (!g_u2 && matrec.at(g.mat).rec.shader == "prime-shader.fx") {
+                    std::string ml = g.mat;
+                    for (char &ch : ml) ch = char(std::tolower((unsigned char)ch));
+                    const bool blocker = has(ml, "shadowblocker") || has(ml, "shadow-blocker") || has(ml, "ik-only") || has(ml, "canopy-shadow");
+                    for (int a : {0x4c, 0x4e})
+                        if (!blocker && std::find(iorder.begin(), iorder.end(), a) == iorder.end()) iorder.push_back(a);
+                }
                 std::vector<StreamIn> st2;
                 for (int aid : iorder) {
                     const AttrMap &am = *attr_map(aid);

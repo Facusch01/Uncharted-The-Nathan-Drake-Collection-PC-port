@@ -8,7 +8,7 @@
 //  * blend source: the term f = sat(t + M / (2s + 0.01)) traced back to one channel of the texture on a sampler unit
 //    (units -> references: the three lighting buffers are three consecutive 'missingtexture' references on units
 //    12-14; references after them take the used units below 12 in ascending order without unit 0, then the one before
-//    them, else the last, takes unit 0), or a vertex-colour-only blend f = sat(1 - v);
+//    them, else the last, takes unit 0; when unit 0 also samples layer 1's colour, the first reference takes it), or a vertex-colour-only blend f = sat(1 - v);
 //  * spec mask scale: the mean of the mask channel the program reads from the material's '-spec' texture.
 #pragma once
 #include "ps3bg.hpp"
@@ -29,6 +29,7 @@ struct Ps3Programs {   // per PS3 pak: the tables the three readers share (built
     };
     std::optional<std::map<std::string, std::pair<std::vector<std::string>, std::vector<Ref_>>>> table;
     std::map<std::string, std::optional<double>> mask;
+    std::optional<std::set<std::string>> vcpow;   // materials whose main-pass vertex program raises a vertex input to a power
 };
 
 std::optional<std::string> material_polarity(Ps3Programs &P, const std::string &name);
@@ -46,5 +47,11 @@ std::optional<double> mask_scale(Ps3Programs &P, const std::string &name);
 int uv_set2_reads(Ps3Programs &P, const std::string &name);
 // the texture coordinates of each texture read of the main-pass program (full name -> {"TEX0.xy", "TEX0.zw", ..., "reg"})
 std::map<std::string, std::set<std::string>> texture_coords(Ps3Programs &P, const std::string &name);
+// the main-pass vertex program raises the vertex colour to a power (LG2 of a vertex input, EX2): the blend programs of
+// materials whose g_blendSoftness_blendOffset_linearBlendOffset offset is not 1 (retail: BLEND_FACTOR_OFFSET)
+bool vc_blend_pow(Ps3Programs &P, const std::string &name);
+// the main-pass fragment program blends its layers with a hard edge: f = sat(100 * t.c + v) (MAD_SAT, constant 100, t a
+// texture channel), where the soft programs divide by 2s + 0.01; retail's twins of such materials have no BLEND_FACTOR_SOFTNESS
+bool hard_blend(Ps3Programs &P, const std::string &name);
 
 }  // namespace u3::fp
