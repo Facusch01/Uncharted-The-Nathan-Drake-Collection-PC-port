@@ -822,6 +822,7 @@ void check_net_package() {
 }
 
 void frame_work() {
+    scan_type_vtables();
     if (active || clock_object) update_net_clock();
     online::frame();
     if (!active) return;
