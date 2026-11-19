@@ -18,7 +18,9 @@ extern "C" UN_API int un_link_modules(const wchar_t *game, const wchar_t *out_di
 
 #include <windows.h>
 
+#include <algorithm>
 #include <cstring>
+#include <iterator>
 
 namespace u3imp {
 
@@ -507,6 +509,63 @@ Bytes ps4_elf(const Bytes &raw) {
     return out;
 }
 
+// ------------------------------------------------------------------------------------------------ 3b. post-link fixes
+// Small fixes on top of the linked helper image, keyed to the release image they were made for (build.json
+// image_sha256). Each entry checks the bytes it replaces first, so a different helper build is never touched.
+// Offsets are guest image offsets (file offset = G3 image start + offset). The caves at 0x2052000/0x2052100 are free,
+// zero-filled space in the menu shell's R+X segment.
+namespace {
+struct PostLinkPatch {
+    uint64_t at;
+    const char *old_hex, *new_hex, *what;
+};
+const char *const POST_LINK_FOR = "a3ddf21851d0cc70bec269157ed0cff664e53854aa94dc3251f3cd4f68ea7290";   // v7.217
+const PostLinkPatch POST_LINK_PATCHES[] = {
+    // Coop Arena on Village crashed on load (read fault at 0x20adeeb): the default-spawner tag check read the tag's value
+    // pointer at entry +4 (PS3 layout); PS4 tag entries hold it at +8 (as u3x marked_default / tag_value already do).
+    {0x20adee5, "04", "08", "default-spawner tag value pointer at +8"},
+    // Coop kill cash popup: the helper's ShowMoney copied the NPC bound frame's local translation into the HUD entry
+    // (+0x40), pushing the "$X" popup off screen. Zero the local offset.
+    {0x2087250, "44895b404489634444896b4844897b4c", "0f57c00f1143400f1f80000000006690", "cash popup: zero local offset"},
+    // ShowMoney: take the popup position from the attack info's victim position (+0x20) unless +0x10 is the victim's
+    // (its w repeats y and it is not zero), instead of always the killer's.
+    {0x2086ff6, "498d5720498d7f244983c728", "e905b0fcff90909090909090", "cash popup: jump to position select"},
+    {0x2052000, "00000000000000000000000000000000000000000000000000000000000000000000000000000000""00",
+     "418b7f14413b7f1c750e418b7f1085ff7406498d5710eb04498d5720488d7a044c8d7a08e9d94f0300", "cash popup: position select"},
+    // Cash popup colour: the PS4 HUD draw maps colour byte 0 to green and byte 1 to blue, so the PS3 green 0x55ff55 came
+    // out blue. Use 0x0055ff (the immediate of the HUD popup draw's colour load).
+    {0xc3655d, "55ff55", "ff5500", "cash popup: green colour"},
+    // ShowMoney: do not bind the popup to the killer's object; the HUD re-reads a bound object's locator every frame,
+    // which made the popup follow the player.
+    {0x208720b, "8b55a08953088b55a489530c", "31d289530889530c0f1f4000", "cash popup: no object binding"},
+    // Mid-match crash (read fault at 0x2100f1d): the net player handle check accepted a slot holding a float (1.0 =
+    // 0x3f800000) as an object pointer. Only accept objects inside the game image or the heap; anything else = no object.
+    {0x2100ef2, "488b104881", "e90912f5ff", "handle check: jump to range check"},
+    {0x2052100,
+     "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+     "488b10f6c2077538488db20000c0f54881fe00402102721e48be00000000100000004839f2721948be00000000008000004839f2730a31c0390a480f44c25dc331c05dc3",
+     "handle check: range check"},
+};
+
+// returns how many fixes were applied (0 when the image is not the release they were made for)
+int apply_post_link(Bytes &image, const std::string &release_sha, const LogFn &lg) {
+    if (release_sha != POST_LINK_FOR) return 0;
+    const G3Layout p = parse_g3(image);
+    for (const PostLinkPatch &f : POST_LINK_PATCHES) {
+        const Bytes old = unhex(f.old_hex), nw = unhex(f.new_hex);
+        const size_t at = p.imagepos + size_t(f.at);
+        if (old.size() != nw.size() || at + old.size() > image.size() || !std::equal(old.begin(), old.end(), image.begin() + std::ptrdiff_t(at)))
+            throw ImageError(fmt("post-link fix '%s': unexpected bytes at image offset %#llx", f.what, (unsigned long long)f.at));
+    }
+    for (const PostLinkPatch &f : POST_LINK_PATCHES) {
+        const Bytes nw = unhex(f.new_hex);
+        std::copy(nw.begin(), nw.end(), image.begin() + std::ptrdiff_t(p.imagepos + size_t(f.at)));
+    }
+    lg(fmt("  post-link fixes: %d applied", int(std::size(POST_LINK_PATCHES))));
+    return int(std::size(POST_LINK_PATCHES));
+}
+}  // namespace
+
 // ------------------------------------------------------------------------------------------------ steps 1-4
 Value build_image(const fs::path &patcher, const fs::path &game, const fs::path &out, const LogFn &lg, const std::optional<fs::path> &elf_out,
                   const std::optional<fs::path> &update, const std::string &ps3_elf, std::string version) {
@@ -538,6 +597,7 @@ Value build_image(const fs::path &patcher, const fs::path &game, const fs::path 
     if (digest != text_of(b.info, "image_sha256"))
         throw ImageError(fmt("the linked image differs from the v%s release (sha256 %s..., expected %s...)", version.c_str(), digest.substr(0, 12).c_str(),
                              text_of(b.info, "image_sha256").substr(0, 12).c_str()));
+    apply_post_link(image, digest, lg);
     const std::string k = with_keys(image, ps3_elf, out / "boot-linked.bin", lg);
     std::error_code ec;
     if (k == "none" && fs::is_regular_file(out / "boot-linked.bin", ec)) {
