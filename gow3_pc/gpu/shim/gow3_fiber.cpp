@@ -84,6 +84,17 @@ void PS4_SYSV_ABI _sceFiberSwitchToFiber(OrbisFiber* fiber, u64 arg_on_run_to,
                                          OrbisFiberContext* ctx) {
     OrbisFiberContext* fiber_ctx = fiber->context;
     if (fiber_ctx) {
+        // A saved context is resumed once: the fiber saves a new one each time it switches away. A second resume
+        // from the same one runs the code after that switch again (Uncharted 3, Syria co-op, 20 Nov 2026: a job
+        // counter lowered twice by one job). Reported to find where it comes from.
+        if (fiber_ctx->resumed.fetch_add(1) != 0) {
+            static std::atomic<unsigned> reports{0};
+            const unsigned n = ++reports;
+            if (n <= 50 || n % 100 == 0)
+                std::fprintf(stdout, "Fiber: %p ('%s') resumed again from a context already resumed (state %u, time %u)\n",
+                             static_cast<void*>(fiber), fiber->name, static_cast<unsigned>(fiber->state.load()), n);
+            std::fflush(stdout);
+        }
         ctx->arg_on_run_to = arg_on_run_to;
         _sceFiberLongJmp(fiber_ctx);
         __builtin_trap();
@@ -367,6 +378,13 @@ s32 PS4_SYSV_ABI sceFiberSwitchImpl(OrbisFiber* fiber, void* addr_context, u64 s
 
     FiberState expected = FiberState::Idle;
     if (!fiber->state.compare_exchange_strong(expected, FiberState::Run)) {
+        static std::atomic<unsigned> refused{0};
+        const unsigned n = ++refused;
+        if (n <= 50 || n % 100 == 0) {
+            std::fprintf(stdout, "Fiber: switch to %p ('%s') refused, its state is %u (time %u)\n",
+                         static_cast<void*>(fiber), fiber->name, static_cast<unsigned>(expected), n);
+            std::fflush(stdout);
+        }
         return ORBIS_FIBER_ERROR_STATE;
     }
 

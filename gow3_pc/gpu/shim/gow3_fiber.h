@@ -53,6 +53,9 @@ struct OrbisFiberContext {
     u64 arg_on_run_to;
     u64 arg_on_return;
     u64 return_val;
+    // set when a switch resumes from this saved context; a second resume from the same one is reported
+    // (gow3_fiber.cpp). Behind the fields the assembly reads, so their offsets stay as they are.
+    std::atomic<u32> resumed;
 };
 
 struct OrbisFiberData {

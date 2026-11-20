@@ -27,6 +27,12 @@ uint64_t find_unique(const unsigned char *image, uint64_t size, const unsigned c
 
 unsigned char *stub_page_near(const unsigned char *image, uint64_t size) {
 #ifdef _WIN32
+    // Windows reserves memory in 64 KiB blocks: one block holds 16 stub pages, handed out in turn, so the fixes do not
+    // use up the free space within jump range of the image (each page is made executable on its own by finish_stub)
+    static unsigned char *pool = nullptr;
+    static const unsigned char *pool_image = nullptr;
+    static unsigned pool_used = 16;
+    if (pool && pool_image == image && pool_used < 16) return pool + 0x1000 * pool_used++;
     // free regions within +-1.5 GiB of the image (below it too: modules and runtime reservations fill the space above)
     const uintptr_t img = reinterpret_cast<uintptr_t>(image);
     const uintptr_t lo = img > 0x60000000u ? img - 0x60000000u : 0x10000;
@@ -36,9 +42,13 @@ unsigned char *stub_page_near(const unsigned char *image, uint64_t size) {
          a = reinterpret_cast<uintptr_t>(info.BaseAddress) + info.RegionSize) {
         if (info.State != MEM_FREE) continue;
         const uintptr_t start = (reinterpret_cast<uintptr_t>(info.BaseAddress) + 0xffff) & ~uintptr_t{0xffff};
-        if (start + 0x1000 > reinterpret_cast<uintptr_t>(info.BaseAddress) + info.RegionSize) continue;
-        void *p = VirtualAlloc(reinterpret_cast<void *>(start), 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-        if (p) return static_cast<unsigned char *>(p);
+        if (start + 0x10000 > reinterpret_cast<uintptr_t>(info.BaseAddress) + info.RegionSize) continue;
+        void *p = VirtualAlloc(reinterpret_cast<void *>(start), 0x10000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        if (!p) continue;
+        pool = static_cast<unsigned char *>(p);
+        pool_image = image;
+        pool_used = 1;
+        return pool;
     }
     return nullptr;
 #else
@@ -76,7 +86,15 @@ extern "C" int u3fix_install(unsigned char *image, uint64_t size) {
     if (!image || !size) return 0;
     int applied = 0;
     applied += u3fix::raise_net_process_pool(image, size) ? 1 : 0;
-    applied += u3fix::install_particle_jobs_wait(image, size) ? 1 : 0;
+    applied += u3fix::install_package_log(image, size) ? 1 : 0;
+    applied += u3fix::install_counter_wait_log(image, size) ? 1 : 0;
+    applied += u3fix::install_job_queue_full_log(image, size) ? 1 : 0;
+    applied += u3fix::install_audio_mix_direct(image, size) ? 1 : 0;
+    applied += u3fix::install_cmdbuf_borrow(image, size) ? 1 : 0;
+    applied += u3fix::install_script_errors_log(image, size) ? 1 : 0;
+    applied += u3fix::install_sid_names(image, size) ? 1 : 0;
+    applied += u3fix::install_retarget_log(image, size) ? 1 : 0;
+    applied += u3fix::install_retarget_mode(image, size) ? 1 : 0;
     applied += u3fix::install_improved_tonemap_curve(image, size) ? 1 : 0;
     applied += u3fix::exposure_filter_at_least_one(image, size) ? 1 : 0;
     return applied;

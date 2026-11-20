@@ -16,7 +16,29 @@ bool finish_stub(unsigned char *stub);
 bool jump_to(unsigned char *image, uint64_t at, unsigned length, const unsigned char *stub);
 
 bool raise_net_process_pool(unsigned char *image, uint64_t size);
-bool install_particle_jobs_wait(unsigned char *image, uint64_t size);
+// the package manager's loaded/unloaded messages printed into the runtime log (package_log.cpp)
+bool install_package_log(unsigned char *image, uint64_t size);
+// a job counter wait that lasts over 5 s is reported with its counter and callers (counter_wait_log.cpp)
+bool install_counter_wait_log(unsigned char *image, uint64_t size);
+// a job the job system drops because its priority queue is full is reported (job_queue_full_log.cpp)
+bool install_job_queue_full_log(unsigned char *image, uint64_t size);
+// the sound driver runs its mixing job's work itself instead of waiting for a job (audio_mix_direct.cpp)
+bool install_audio_mix_direct(unsigned char *image, uint64_t size);
+// a graphics context takes a free command buffer when its thread's is still in use (cmdbuf_borrow.cpp)
+bool install_cmdbuf_borrow(unsigned char *image, uint64_t size);
+// the game's script and animation error messages printed into the runtime log (script_errors_log.cpp)
+bool install_script_errors_log(unsigned char *image, uint64_t size);
+// names without debug memory are shown as their 32-bit ids (sid_names.cpp)
+bool install_sid_names(unsigned char *image, uint64_t size);
+// each skeleton-to-skeleton animation mapping the game looks up is printed once, found or missing (retarget_log.cpp)
+bool install_retarget_log(unsigned char *image, uint64_t size);
+// skeleton retargets switch to their multiplayer settings while a net game runs, as on PS3 (retarget_mode.cpp)
+bool install_retarget_mode(unsigned char *image, uint64_t size);
+// every job counter's history: maker, job count, jobs finished (job_trace.cpp)
+bool install_job_trace(unsigned char *image, uint64_t size);
+void counter_story(const void *counter, char *out, size_t size);
+// the jobs waiting in each of the 8 priority queues, as text (job_queue_full_log.cpp)
+void job_queue_counts(char *out, size_t size);
 bool install_improved_tonemap_curve(unsigned char *image, uint64_t size);
 // the auto exposure averages at least one frame: luminance filter size 0 as PS3 (exposure_filter.cpp)
 bool exposure_filter_at_least_one(unsigned char *image, uint64_t size);
