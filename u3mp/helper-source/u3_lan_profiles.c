@@ -1442,10 +1442,9 @@ static void n03_retag(uint8_t *page);   /* fixer L n003 */
 static int n03_source(uintptr_t base,int32_t *event,ProfileState *s);   /* fixer L n003 */
 static void n32_retag(uint8_t *page);   /* fixer L n032 */
 static int n32_source(uintptr_t base,int32_t *event,ProfileState *s);   /* fixer L n032 */
-static int n33_draw(uint64_t *r);   /* fixer L n033 */
-__attribute__((section(".text.ext"),noinline)) static int r01_reg(uint64_t *r);   /* ring r01 */
-__attribute__((section(".text.ext"),noinline)) static void r01_tick(uintptr_t base);   /* ring r01 */
-__attribute__((section(".text.ext"),noinline)) static int r01_match(uint8_t *obj,uint32_t *fl);   /* ring r01 */
+__attribute__((visibility("hidden"))) int u3x_ring_draw(uintptr_t base,const uint64_t *r);   /* v7.218 C++ ring tint */
+__attribute__((visibility("hidden"))) int u3x_ring_reg(uintptr_t base,const uint64_t *r);
+__attribute__((visibility("hidden"))) void u3x_ring_tick(uintptr_t base,void (*log)(uintptr_t,const char*));
 __attribute__((section(".text.ext"),noinline)) static void n10_tick(uintptr_t base);   /* fixer L n010 (end of the fixer L region) */
 __attribute__((section(".text.ext"),noinline)) static void n22_tick(uintptr_t base);   /* fixer L n022 (end of the file) */
 __attribute__((section(".text.ext"),noinline)) static void pl_hidden_guard(uintptr_t base,ProfileState *s);   /* v7.103 (end of the file) */
@@ -9989,8 +9988,8 @@ EXT static int n03_source(uintptr_t base,int32_t *event,ProfileState *s){
  *lan=keep;return done;}
 EXT static int n_kind(uintptr_t base,int kind,ProfileState *s,uint64_t *r){
  (void)s;if(!r||!base||kind!=244)return 0;
- if(r[0]==3||r[0]==4)return n33_draw(r);   /* fixer L n033 (ring draw wrap, U3MP_N033=1/2 only) */
- if(r[0]==5)return r01_reg(r);   /* ring r01: particle spawner tint 0xec3b20 (U3MP_N033=1/2 only) */
+ if(r[0]==3||r[0]==4)return u3x_ring_draw(base,r);   /* v7.218 C++ ring tint (U3MP_N033=1/2 only) */
+ if(r[0]==5)return u3x_ring_reg(base,r);   /* v7.218 C++ ring tint: particle spawner tint 0xec3b20 */
  if(r[0]==2){n21_log(base,r);return 0;}   /* fixer L n021 (diag, U3MP_LPROBE_LOG=1 only) */
  return n03_hdr(base,r);}
 #pragma clang section text="" rodata=""
@@ -10270,12 +10269,9 @@ EXT static void h08_one(uintptr_t base,uint8_t *p,int32_t team,uint32_t now,uint
  * | A valid << 16 | B valid << 17 | A instance flags byte << 24; ea[175] A tint r, g, b (x100, bytes) | B flags << 24; ea[176] B
  * tint r, g, b (x100); ea[177] / ea[178] owners of slots 0..3 / 4..7; ea[179] diag runs | slots owned by the local team << 24.
  * Positions: process locator +0xd0 (territory: 0x7b4c37; the local player is the same object family). Peek `n30=20ebf04:0x1c`. */
-EXT static uint8_t *n30_inst(uint8_t *h){uint8_t **pp=*(uint8_t***)h;uint32_t g=*(uint32_t*)(h+8);if(!stage_ptr_ok(pp)||!g)return 0;uint8_t *o=*pp;return (stage_ptr_ok(o)&&*(uint32_t*)o==g)?o:0;}
-EXT static uint32_t n30_tint(uint8_t *o){
- if(!o)return 0;uint32_t r=0;for(int k=0;k<3;k++){float f=*(float*)(o+0x50+4*k)*100.0f;int v=(int)(f+0.5f);if(v<0)v=0;if(v>255)v=255;r|=(uint32_t)v<<(8*k);}return r;}
 /* n30_diag (fixer L n030 placement diagnostics) removed in sw06 (v7.52) for ext code room. */
 EXT static void h08_tick(uintptr_t base){
- r01_tick(base);   /* ring r01: boot.log lines (on change, 40 max) */
+ u3x_ring_tick(base,ol01_print);   /* v7.218 C++ ring tint: list reset, boot.log counts */
  if(!*(uint8_t*)(base+0x17d5c61u)){for(int i=0;i<8;i++){h08_obj[i]=0;n23_tab[i]=0;}return;}
  if((++h08_fr&15u)!=0)return;
  uint8_t *pl=*(uint8_t**)(base+0x17cb060u+0x370);if(!stage_ptr_ok(pl)){h08_d[15]++;return;}
@@ -10797,139 +10793,7 @@ EXT static int n32_source(uintptr_t base,int32_t *event,ProfileState *s){
  (void)s;return u3x_n32_source(base,event);}   /* v7.145 C++ */
 #pragma clang section text="" rodata=""
 /* ===== end fixer L n032 ===== */
-/* ===== fixer L n033: zone ring colour at the geometry-particle draw (opt-in diagnostic + experimental fix) =====
- * The zone "fog" is the verticalRing geometry of nav-waypoint-5m-straight(-burst) (territory-ring-straight, u3parts/unique/
- * territory-ring.material, no ND_INSTPART). Its emitter flags (root +0x40 bit 0x20) send it through 0xf8a2d0, which already puts
- * particle colour x instance tint (flag 8, +0x50..+0x58) x alpha into the draw record +0x40; the type-2 draw at 0xf67485 copies
- * that to render object +0xe0 = constant block (object +0x50, pointer at drawable +0x1f8) +0x90 and draws through [drawable]+0x10
- * (0xf67540). The ring shader instead takes its colour from the VS colour stream (V# s[24..27] = VS user table +0x20) times the
- * PS constant at (PS user table +8) + 0x148 (W w013). PS3's ring takes the particle colour as vertex attribute v4.
- * n033 wraps that draw (builder U3MP_N033=1/2: site 0xf67534 -> x-stubs 0x13880 (pre, sub 3) / 0x13900 (post, sub 4), kind 244):
- *  pre:  the drawable's colour block belongs to a registered zone particle (n023 registry ea[128..143] handles +0x3b0[8], instance +0x28 == block
- *        - 0x50) -> remember the command buffer write pointer;
- *  post: walk the PM4 the draw emitted, take SET_SH_REG (0x76) USER_DATA_VS_0/1 (0x4c/0x4d) and USER_DATA_PS_0/1 (0x0c/0x0d),
- *        record the VS colour-stream V# (table +0x20), the PS constant pointer (table +8) and its +0x148 value;
- *  fix (U3MP_N033=2, ea[122] bit4), only for zone instances with tint flag 8: constant +0x148 rgb = original rgb x block colour rgb
- *        (the tinted particle colour), the original kept per constant pointer (8-entry cache) so a persistent buffer is not
- *        compounded. Without the switch nothing is hooked (default build = dev).
- * Diagnostics n33.d[32] (own section .bss.u3ext.x33, after every existing EXT_BSS symbol): [0] geometry draws seen, [1] zone
- * draws, [2] zone draws with flag 8, [3] PM4 scans, [4] scans skipped (buffer switch), [5] dwords emitted, [6..7] VS user table,
- * [8..9] PS user table, [10..13] VS V# (table +0x20), [14..15] PS constant pointer, [16..19] its +0x148 before the fix, [20..23]
- * block colour (+0x90), [24] fix writes, [25] constant pointer changes, [26] drawable lo, [27] render object lo, [28] SET_SH_REG
- * packets | other packets << 16, [29] user-data regs found (1 VS lo, 2 VS hi, 4 PS lo, 8 PS hi), [30..31] VS user table +0x30/+0x34
- * (next resource; the colour stream itself is not read, to keep the diagnostic to CPU-visible tables). */
-#pragma clang section text=".text.ext" rodata=".rodata.ext"
-static struct{volatile uint32_t d[32];uint8_t *cmd;uint32_t *wp0;uint8_t *blk;uint8_t *cp[8];uint32_t cv[8][4];uint32_t arm,ci;uint8_t *lastcb;
- uintptr_t rp[8];uint32_t rg[8],rl[8],ri,rd[24];}   /* ring r01: tinted spawner instances, their gen (+0), logged; rd = r01 diag */
- n33 __attribute__((section(".bss.u3ext.x33"),aligned(16),used));
-EXT static uint8_t *n33_match(uint8_t *obj2,uint32_t *fl){
- for(int k=0;k<8;k++){uint8_t *p=(uint8_t*)(uintptr_t)n23_tab[k];if(!p||!stage_ptr_ok(p))continue;
-  for(int j=0;j<8;j++){uint8_t *in=n30_inst(p+0x3b0+16*j);if(!in)continue;
-   if(*(uint8_t**)(in+0x28)==obj2){*fl=*(uint8_t*)(in+4);return in;}}}
- return 0;}
-EXT static int n33_pre(uint64_t *r){
- n33.d[0]++;n33.arm=0;
- uint8_t *d=(uint8_t*)r[1],*cmd=(uint8_t*)r[5];
- if(!stage_ptr_ok(d)||!stage_ptr_ok(cmd))return 0;
- uint8_t *blk=*(uint8_t**)(d+0x1f8);if(!stage_ptr_ok(blk))return 0;
- uint32_t fl=0,sp=0;if(!n33_match(blk-0x50,&fl)){if(!r01_match(blk-0x50,&fl))return 0;   /* ring r01: tinted spawner particle */
-  sp=4;n33.rd[1]++;for(int k=0;k<3;k++)n33.rd[4+k]=*(uint32_t*)(blk+0x90+4*k);}
- else{n33.d[1]++;if(fl&8)n33.d[2]++;}
- n33.d[26]=(uint32_t)(uintptr_t)d;n33.d[27]=(uint32_t)(uintptr_t)(blk-0x50);
- for(int k=0;k<4;k++)n33.d[20+k]=*(uint32_t*)(blk+0x90+4*k);
- uint32_t *wp=*(uint32_t**)(cmd+0x10);if(!wp||((uintptr_t)wp&3)||(uintptr_t)wp>=(1ull<<47))return 0;
- n33.cmd=cmd;n33.wp0=wp;n33.blk=blk;n33.arm=1u|((fl&8)?2u:0u)|sp;
- return 0;}
-EXT static int n33_post(void){
- uint32_t arm=n33.arm;n33.arm=0;if(!arm)return 0;
- uint32_t *p=n33.wp0,*e=*(uint32_t**)(n33.cmd+0x10);
- if(!p||!e||e<p||e-p>4096){n33.d[4]++;return 0;}
- n33.d[3]++;n33.d[5]=(uint32_t)(e-p);
- uint32_t vlo=0,vhi=0,plo=0,phi=0,nsh=0,noth=0,got=0;
- while(p<e){uint32_t h=*p,t=h>>30;
-  if(t==3){uint32_t c=((h>>16)&0x3fffu)+1u,op=(h>>8)&0xffu;
-   if(p+1+c>e)break;
-   if(op==0x76u&&c>=2){nsh++;uint32_t reg=p[1]&0xffffu;
-    for(uint32_t i=0;i+1<c;i++){uint32_t rg=reg+i,v=p[2+i];
-     if(rg==0x4cu){vlo=v;got|=1;}else if(rg==0x4du){vhi=v;got|=2;}else if(rg==0x0cu){plo=v;got|=4;}else if(rg==0x0du){phi=v;got|=8;}}}
-   else noth++;
-   p+=1+c;}
-  else if(t==2)p++;
-  else{uint32_t c=((h>>16)&0x3fffu)+1u;p+=1+c;noth++;}}
- if((got&12)!=12)got|=u3x_ring_state(n33.cmd,e,&vlo,&vhi,&plo,&phi);   /* v7.111 (C++): the user data set by an earlier draw; +16 = walked */
- n33.d[28]=nsh|noth<<16;n33.d[29]=got;if(arm&4u){n33.rd[3]++;n33.rd[14]=got;}
- if((got&3)==3){n33.d[6]=vlo;n33.d[7]=vhi;uint8_t *vt=(uint8_t*)(((uint64_t)vhi<<32)|vlo);
-  if(stage_ptr_ok(vt)){for(int k=0;k<4;k++)n33.d[10+k]=*(uint32_t*)(vt+0x20+4*k);
-   n33.d[30]=*(uint32_t*)(vt+0x30);n33.d[31]=*(uint32_t*)(vt+0x34);}}
- if((got&12)==12){n33.d[8]=plo;n33.d[9]=phi;uint8_t *pt=(uint8_t*)(((uint64_t)phi<<32)|plo);
-  if(stage_ptr_ok(pt)){uint8_t *cb=*(uint8_t**)(pt+8);n33.d[14]=(uint32_t)(uintptr_t)cb;n33.d[15]=(uint32_t)((uintptr_t)cb>>32);
-   if(cb!=n33.lastcb){n33.d[25]++;n33.lastcb=cb;}
-   if(stage_ptr_ok(cb)){uint32_t *c=(uint32_t*)(cb+0x148);for(int k=0;k<4;k++)n33.d[16+k]=c[k];if(arm&4u){n33.rd[13]=(uint32_t)(uintptr_t)cb;for(int k=0;k<3;k++)n33.rd[7+k]=c[k];}
-    if((X.ea[122]&0x10u)&&(arm&2u)){
-     int ix=-1;for(int i=0;i<8;i++)if(n33.cp[i]==cb){ix=i;break;}
-     if(ix<0){ix=(int)(n33.ci++&7u);n33.cp[ix]=cb;for(int k=0;k<4;k++)n33.cv[ix][k]=c[k];}
-     float *cf=(float*)c;const float *bc=(const float*)(n33.blk+0x90);const float *ov=(const float*)n33.cv[ix];
-     for(int k=0;k<3;k++)cf[k]=ov[k]*bc[k];
-     n33.d[24]++;if(arm&4u){n33.rd[2]++;for(int k=0;k<3;k++){n33.rd[7+k]=n33.cv[ix][k];n33.rd[10+k]=c[k];}}}}}}
- return 0;}
-/* ===== ring agent r01 (coop-visual-v7106): tinted particle-spawner rings get n033's constant fix =====
- * The Co-op Adventure checkpoint ring is a ParticleSpawner (nav-waypoint-5m, tag color (2.0, 0.1, 0.1)), not a territory. The
- * spawner code tints the instance (+0x50..+0x5c, flag 8 at 0xec3b20, = PS3 1.19 0x977594..0x977754); the builder hooks that
- * 'or byte [r15+4],8' (x-stub 0x15e80, kind 244 sub 5, r10 = r15 = the instance) and r01_reg keeps the last 8 instances.
- * n33_pre accepts a geometry draw whose colour block belongs to one of them (instance +0x28 == block - 0x50, flag 8, tint not
- * white), and n33_post applies the n033 constant fix to it. rd: [0] registrations, [1] matched draws, [2] fix writes,
- * [3] PM4 scans, [4..6] block colour, [7..9] PS constant +0x148 before, [10..12] after, [13] constant pointer lo, [14] user-data
- * regs found; [16..23] tick state. */
-EXT static uint32_t r01_c(uint32_t bits){float f;__builtin_memcpy(&f,&bits,4);f*=100.0f;if(!(f>0.0f))return 0;if(f>99999.0f)return 99999;return (uint32_t)(f+0.5f);}
-EXT static void r01_x(char *b,int *n,const char *t,uint32_t v,int hex){static const char h[]="0123456789abcdef";while(*t&&*n<180)b[(*n)++]=*t++;
- if(hex){b[(*n)++]='0';b[(*n)++]='x';for(int i=28;i>=0;i-=4)b[(*n)++]=h[(v>>i)&15];return;}
- char d[12];int k=0;do{d[k++]=(char)('0'+v%10);v/=10;}while(v);while(k)b[(*n)++]=d[--k];}
-EXT static void r01_rgb(char *b,int *n,const char *t,const volatile uint32_t *v){
- static const char cm[]=",";r01_x(b,n,t,r01_c(v[0]),0);r01_x(b,n,cm,r01_c(v[1]),0);r01_x(b,n,cm,r01_c(v[2]),0);}
-EXT static int r01_tinted(uint8_t *in){
- for(int k=0;k<3;k++){float f=*(float*)(in+0x50+4*k);if(f<0.95f||f>1.05f)return 1;}return 0;}
-EXT static int r01_reg(uint64_t *r){
- uint8_t *in=(uint8_t*)r[1];n33.rd[0]++;if(!stage_ptr_ok(in))return 0;uint32_t g=*(uint32_t*)in;
- for(int k=0;k<8;k++)if(n33.rp[k]==(uintptr_t)in){if(n33.rg[k]!=g){n33.rg[k]=g;n33.rl[k]=0;}return 0;}
- uint32_t k=n33.ri++&7u;n33.rg[k]=g;n33.rl[k]=0;n33.rp[k]=(uintptr_t)in;return 0;}
-EXT static int r01_match(uint8_t *obj,uint32_t *fl){
- for(int k=0;k<8;k++){uint8_t *in=(uint8_t*)n33.rp[k];if(!in)continue;
-  if(!stage_ptr_ok(in)||*(uint32_t*)in!=n33.rg[k]){n33.rp[k]=0;continue;}
-  if(*(uint8_t**)(in+0x28)!=obj)continue;
-  if(!(in[4]&8u)||!r01_tinted(in))return 0;
-  *fl=in[4];return 1;}
- return 0;}
-EXT static void r01_tick(uintptr_t base){
- static const char t_off[]="U3MP r01: ring draw hook not in this image (U3MP_N033 unset): tinted rings stay white",
-  t_sp[]="U3MP r01: tinted particle spawned: tint x100 ",t_al[]=" alpha ",t_fl[]=" flags ",t_in[]=" inst ",
-  t_dr[]="U3MP r01: tinted ring draws ",t_fx[]=" fixes ",t_bk[]=" block x100 ",t_cb[]=" const x100 ",t_to[]=" -> ",t_pt[]=" regs ",t_sw[]=" fix-switch ",
-  t_zn[]="U3MP r01: zone ring draws ",t_zf[]=" (tint flag ",
-  t_nd[]="U3MP r01: tinted particle alive, no ring draw matched; geometry draws ",t_rg[]=" registrations ";
- if(!*(uint8_t*)(base+0x17d5c61u)||n33.rd[16]>=40)return;
- if((++n33.rd[19]&31u))return;
- char b[200];int n;
- if(!(X.ea[122]&8u)){if(!n33.rd[20]){n33.rd[20]=1;n33.rd[16]++;ol01_print(base,t_off);}return;}
- uint32_t alive=0;
- for(int k=0;k<8;k++){uint8_t *in=(uint8_t*)n33.rp[k];if(!in||!stage_ptr_ok(in)||*(uint32_t*)in!=n33.rg[k]||!r01_tinted(in))continue;
-  alive++;if(n33.rl[k])continue;n33.rl[k]=1;
-  n=0;r01_rgb(b,&n,t_sp,(const volatile uint32_t*)(in+0x50));r01_x(b,&n,t_al,r01_c(*(uint32_t*)(in+0x5c)),0);
-  r01_x(b,&n,t_fl,*(uint16_t*)(in+4),1);r01_x(b,&n,t_in,(uint32_t)(uintptr_t)in,1);b[n]=0;n33.rd[16]++;ol01_print(base,b);}
- uint32_t fr=n33.rd[19];
- if(n33.rd[1]){uint32_t h=n33.rd[1]?1u:0u;for(int k=4;k<13;k++)h=h*31u+r01_c(n33.rd[k])/5u;
-  if(h!=n33.rd[17]&&(!n33.rd[18]||fr-n33.rd[18]>=512u)){n33.rd[17]=h;n33.rd[18]=fr;
-   n=0;r01_x(b,&n,t_dr,n33.rd[1],0);r01_x(b,&n,t_fx,n33.rd[2],0);r01_rgb(b,&n,t_bk,n33.rd+4);r01_rgb(b,&n,t_cb,n33.rd+7);
-   r01_rgb(b,&n,t_to,n33.rd+10);r01_x(b,&n,t_pt,n33.rd[14],0);r01_x(b,&n,t_sw,(X.ea[122]>>4)&1u,0);b[n]=0;n33.rd[16]++;ol01_print(base,b);}}
- else if(alive){if(++n33.rd[21]==10u){n=0;r01_x(b,&n,t_nd,n33.d[0],0);r01_x(b,&n,t_rg,n33.rd[0],0);b[n]=0;n33.rd[16]++;ol01_print(base,b);}}
- if(n33.d[1]){uint32_t h=7u;for(int k=16;k<23;k++)h=h*31u+r01_c(n33.d[k])/5u;
-  if(h!=n33.rd[22]&&(!n33.rd[23]||fr-n33.rd[23]>=512u)){n33.rd[22]=h;n33.rd[23]=fr;
-   n=0;r01_x(b,&n,t_zn,n33.d[1],0);r01_x(b,&n,t_zf,n33.d[2],0);b[n++]=')';r01_x(b,&n,t_fx,n33.d[24],0);
-   r01_rgb(b,&n,t_bk,n33.d+20);r01_rgb(b,&n,t_cb,n33.d+16);b[n]=0;n33.rd[16]++;ol01_print(base,b);}}}
-/* ===== end ring agent r01 ===== */
-EXT static int n33_draw(uint64_t *r){
- if(!(X.ea[122]&8u))return 0;
- return r[0]==3?n33_pre(r):n33_post();}
-#pragma clang section text="" rodata=""
-/* ===== end fixer L n033 ===== */
+/* fixer L n033 / ring r01 (zone and co-op checkpoint ring colour): C++ since v7.218, u3x_fixes.cpp "ring tint" */
 #pragma clang section text=".text.ext" rodata=".rodata.ext"
 /* ===== agent 3 g003 (mp-visual-fixes issue 3): co-op grabbed player, the fist icon in the blue ring =====
  * PS3 1.19 element draw f_672404 (PS4 0xc2fd10): after the progress ring (0x673774..0x6737e0, b032's k32_ring) PS3 draws the
