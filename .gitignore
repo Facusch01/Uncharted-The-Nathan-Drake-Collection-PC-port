@@ -8,6 +8,7 @@
 !/analysis/STATUS.md
 !/analysis/PLAN.md
 /gow3_pc/out/
+/.ccache/
 /Uncharted.lnk
 __pycache__/
 *.pyc
