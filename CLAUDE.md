@@ -19,6 +19,12 @@ Port assets from the PS3 only when PS4 has none: if PS4 has the asset anywhere (
 baseball-shirt / red shirt Drake as a campaign skin), use PS4's, with its better textures and a smaller import
 (see AGENTS.md, "Assets: PS4 first").
 
+Always on, every session (see AGENTS.md, "Agent tools: context-mode and caveman lite, always on"):
+- context-mode: run any step that counts, filters or searches more than about 20 lines (logs, build output,
+  disassembly, big files) through the context-mode connector's `ctx_execute` and print only the answer.
+- Caveman lite: replies are short and direct, in complete sentences, with every technical fact kept exact. Chat only:
+  code, comments, commits, PRs and docs stay normal prose.
+
 Helper source (`u3mp/helper-source/`), in short: a contributor syncs their fork, edits only that folder, and opens a
 pull request; the maintainer merges it, then builds and ships the next helper version. So: never make or rename a helper
 version, never touch the generated block at the end of `u3_lan_profiles.c`, write only between the contributor markers,

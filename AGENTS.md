@@ -100,6 +100,20 @@ When you work for a contributor:
 - **Port only the rows assigned to your contributor.** The old-versus-new tests (`tests/`) are retired; the group
   tests are maintainer-only.
 
+## Agent tools: context-mode and caveman lite, always on
+
+- **context-mode is always on.** Agents that have the context-mode connector (MCP server / plugin) use it for every
+  step that counts, sums, filters or searches more than about 20 lines of data: logs (`boot.log`), build and test
+  output, disassembly, big JSON / TSV, long source files, web pages. Run the step with `ctx_execute` and print only the
+  answer, not the raw data; use `ctx_search` to find more in output it already indexed. Small output and file edits
+  use the normal tools. Do not turn it off or work around it.
+- **Caveman lite is the reply style, always on.** Answer first, then the reason, then the next step. Short, complete,
+  natural sentences; no greetings, filler, hedging or recaps. Keep every technical fact exact: commands, paths,
+  numbers, addresses, error lines verbatim. Never drop a "not", "never", "no" or "only". Use plain full sentences for
+  security warnings, irreversible actions, step-by-step instructions and questions to the owner. It applies to chat
+  replies only: code, comments, commit messages, pull requests, docs and release notes stay normal, clear prose. The
+  style stays on until the owner says "normal mode".
+
 ## Other rules
 
 - No game files, no server addresses, host names or credentials, anywhere in the repository or in commit messages.
