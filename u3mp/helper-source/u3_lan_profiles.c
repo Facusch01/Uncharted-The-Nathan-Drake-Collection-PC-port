@@ -1451,6 +1451,11 @@ __attribute__((visibility("hidden"))) void u3x_ng_put_hash(uint8_t *md,uint32_t 
 __attribute__((visibility("hidden"))) uint32_t u3x_ng_host_name(const uint8_t *md);   /* v7.232 #92 C++ */
 __attribute__((visibility("hidden"))) void u3x_ng_match_log(uintptr_t base,void *s);   /* v7.232 #92 C++ */
 __attribute__((visibility("hidden"))) uint32_t u3x_ng_host_hash(const uint8_t *md);
+__attribute__((visibility("hidden"))) void u3x_jip_order_host(uintptr_t base);   /* v7.235 #90 C++ */
+__attribute__((visibility("hidden"))) void u3x_jip_order_joiner(uintptr_t base);
+__attribute__((visibility("hidden"))) void u3x_jip_plays(uintptr_t base,int tell_host);
+__attribute__((visibility("hidden"))) uint8_t u3x_jip_md_bit(void);
+__attribute__((visibility("hidden"))) void u3x_jip_heard(const uint8_t *id);
 __attribute__((visibility("hidden"))) void u3x_ofetch_tick(uintptr_t base);   /* v7.228 #84 C++ */
 __attribute__((visibility("hidden"))) int u3x_ofetch_card(uint8_t *view,const char *name,uint32_t *shown);
 __attribute__((section(".text.ext"),noinline)) static void n10_tick(uintptr_t base);   /* fixer L n010 (end of the fixer L region) */
@@ -3832,6 +3837,7 @@ JPX static int fj_msg_in(uintptr_t base,const uint8_t *id,uint32_t ty,const uint
  static const char t_i[]="join info (0x1f0) from ",t_f[]=": playing/late join allowed/in a match, bits ",t_l[]="late joiner loaded (0x1f1): ";
  (void)base;
  if(ty==0x1f0u){if(n>=0x18&&d[0]==0x4a){fj_hi.flags=d[2];fj_hi.sel=*(const int16_t*)(d+4);fj_hi.room=*(const uint64_t*)(d+8);fj_hi.name=*(const uint32_t*)(d+0x10);fj_hi.ok=1;fj_note(t_i,id,t_f,(int32_t)d[2]);}return 1;}
+ if(ty==0x1f1u&&n>=1&&d[0]==1){u3x_jip_heard(id);return 1;}   /* v7.235 #90: 0x1f1 with the byte 1 = the late joiner plays */
  if(ty==0x1f1u){copy(jl_name,id,0x10);fj_note(t_l,id,0,-1);return 1;}
  return 0;}
 #pragma clang section text="" rodata=""
@@ -4755,6 +4761,7 @@ JPX static uint32_t ng_name_at(ProfileState *s,int32_t sel,int *ok){
 JPX static uint32_t ng_h12(uint32_t v){return (v^(v>>12)^(v>>24))&0xfffu;}
 JPX static void ng_stamp(uintptr_t base,ProfileState *s,uint8_t *md){
  if(jip_loaded)md[0x32]|=0x10;   /* v7.107 jip2: late joiner loaded (0x33) */
+ md[0x32]|=u3x_jip_md_bit();   /* v7.235 #90: late joiner in Playing (bit 7) */
  {uint8_t *ms=LNB_SESS_MATCH(base);   /* v7.109 join: PS4 0x746790 (game type 18, rules, late join closed 0x7462b0) */
   if(*(uint32_t*)(base+0x1b68810u)==0x1du&&*(uint64_t*)(ms+0x18)&&*(uint32_t*)(ms+0x12e4)==*(uint32_t*)(ms+0x12e8)&&
      !(((int(*)(void*))(base+0x746790u))((void*)(base+0x17cb060u))&0xff))md[0x32]|=0x20;}
@@ -4901,12 +4908,13 @@ JPX static void jip_tick(uintptr_t base){
   ol01_cat(b,&n,t_s3);ol01_dec(b,&n,st[i]);b[n]=0;so_note(b,0,-1,0);jip_st[i]=st[i];}
  jip_host(base);   /* v7.107 jip2 */
  fw_monitor_log();   /* v7.108 follow */
+ u3x_jip_order_host(base);u3x_jip_order_joiner(base);   /* v7.235 #90: PS3's late-join order */
  if(!jip_on){jip_loaded=0;return;}
  uint32_t ns=*(uint32_t*)(base+0x1b68810u);if(ns==jip_ns)return;jip_ns=ns;
  if(ns==0x33&&!jip_loaded){static const char t_l[]="late joiner: loaded, telling the host (member data +0x32 bit 4)";   /* v7.107 jip2 */
   jip_loaded=1;so_note(t_l,0,-1,0);uint8_t *ps=LNB_SESS_PARTY(base);if(*(uint64_t*)(ps+0x18))fl_md(0,ps);
   if(fj_hi.ok){uint8_t *ms=LNB_SESS_MATCH(base);uint8_t *h=lnb_find_member(ms,*(uint32_t*)(ms+0x12e8));if(h)mq_send(base,h,0x1f1u,0,0);}}   /* v7.109 join */
- if(ns==0x1d){so_note(t_d,0,-1,0);jip_on=0;jip_loaded=0;return;}
+ if(ns==0x1d){so_note(t_d,0,-1,0);jip_on=0;jip_loaded=0;u3x_jip_plays(base,fj_hi.ok);return;}   /* v7.235 #90 */
  int still=(ns>=0x31&&ns<=0x33)||(ns>=0x2c&&ns<=0x30)||ns==0x1b||ns==0x1c;
  char b[128];int n=0;ol01_cat(b,&n,still?t_n:t_x);n-=2;ng_hex(b,&n,ns,2);
  if(!still){static const char t_p[]=" (NGM +0x370 ",t_y[]="yes",t_o[]="no",t_h[]=", +0x380 ",t_e[]=")";   /* v7.107 jip2 */
@@ -11002,6 +11010,7 @@ U3H uint8_t *u3h_nmh(uintptr_t base){return m04_nmh(base);}
 U3H int u3h_lan_backend(void){return onb_lan_flag();}
 U3H void *u3h_online_backend(uintptr_t base){return onb_mgr(base);}
 U3H void u3h_jip_started(void){fl_jip=0;jip_on=1;jip_ns=0x31;}
+U3H uint8_t *u3h_jip_party_md(uintptr_t base,const uint8_t *np){return jip_party_md(base,np);}   /* v7.235 #90 */
 U3H void u3h_fi_send(uintptr_t base){fi_send(base);}
 U3H int32_t u3h_fi_selected(void){return fi_sel;}
 U3H void u3h_fi_select(int32_t row){fi_sel=row;}

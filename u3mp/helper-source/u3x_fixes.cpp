@@ -44378,3 +44378,160 @@ extern "C" U3X_FN [[clang::minsize]] int u3x_ofetch_card(uint8_t *view, const ch
     *shown = gen;
     return 1;
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// v7.235 #90 "join in progress: my player never spawns". PS3 1.19's order for a late joiner (the PS3 code read only to
+// learn the behaviour): its LoadLevels state goes straight on to Playing (no ready report, no WaitReady); 4 s into
+// Playing it reports ready once; only that report lets the match host's late-join slot (status 2) do its second step:
+// the match state for the joiner, its late start message (the start time for the net game process plus the "late
+// joiner may spawn" script event) and the slot's end. On the PC the guest branch of LoadLevels is open for every guest
+// (image patch x023), so a late joiner reported ready at the end of its loading and waited in WaitReady: the host
+// closed the slot then, the start message ended WaitReady instead of reaching Playing, and the ready sent from Playing
+// found no slot: the player never spawned (issue 90 log: ready to the host before net state 0x1d, slot 0 at 6 all match).
+// This keeps the game code and restores PS3's order:
+//  joiner: as a late joiner (late-join status above 3, a guest of the match room) in WaitReady, the start time is set
+//          to now, so WaitReady's own step to Playing runs at once; on reaching Playing it tells the match host
+//          (member data +0x32 bit 7, and the helper message 0x1f1 with the one byte 1; a bare 0x1f1 is "loaded").
+//  host:   a slot that reaches status 2 (first step done) is parked at 3, a value the game's late-join callback
+//          passes over, until its joiner says it plays; then the early ready is dropped (+0x5ed = 0) and the slot is
+//          back at 2, so the joiner's ready from Playing starts the second step. A parked slot whose player is gone is
+//          freed (as the callback frees status 2). Fallbacks: a ready not followed by the word within 6 s (a joiner
+//          without this helper: PS3 / RPCS3 send their ready from Playing) or parked 120 s without word: back to 2 as it
+//          was; back at 2 for 10 s without a ready (the word was slower than the 4 s): the ready is taken as given.
+extern "C" {
+void u3x_fl_md(void *, uint8_t *);
+uint8_t *u3x_jip_slot_player(uintptr_t base, uint32_t handle);
+void u3h_fj_note(const char *before, const uint8_t *id, const char *after, int32_t value);
+int32_t u3h_mq_send(uintptr_t base, const uint8_t *id, uint32_t type, const void *data, uint32_t length);
+U3H_IMPORT uint8_t *u3h_jip_party_md(uintptr_t base, const uint8_t *np);   // the party member data of a net player's owner, or null
+}
+namespace jorder {
+constexpr uintptr_t STATUS = 0x1b69530, HANDLES = 0x1b69560, MATCH = 0x17d6420, PARTY = 0x17dc298;
+constexpr uintptr_t PROCESS = 0x1b3ee38, WAIT_READY = 0x1b68938, NET_CLOCK = 0x17c3580, CLOCK = 0x17b4a90 + 0x114;
+constexpr uint8_t MD_PLAYS = 0x80;
+constexpr uint32_t MSG_JOINER = 0x1f1, PARKED = 3, PARK_MAX = 120 * 300, READY_MAX = 10 * 300, READY_WAIT = 6 * 300;
+U3X_RO const char t_skip[] = "late joiner: WaitReady skipped";
+U3X_RO const char t_tell[] = "late joiner: in Playing, host told";
+U3X_RO const char t_heard[] = "late joiner in Playing: ";
+U3X_RO const char t_park[] = "late join parked, slot ";
+U3X_RO const char t_go[] = "late join: joiner plays, slot ";
+U3X_RO const char t_old[] = "late join: no word from the joiner, its own ready kept, slot ";
+U3X_RO const char t_late[] = "late join: ready taken, slot ";
+U3X_RO const char t_gone[] = "late join: parked player left, slot ";
+U3X_BSS uint8_t plays, skipped, heard[16];
+U3X_BSS uint8_t phase[12];   // per slot: 0 not seen at 2, 1 parked, 2 back at 2
+U3X_BSS uint32_t since[12], ready_at[12];
+
+[[gnu::always_inline]] inline bool same_id(const uint8_t *a, const uint8_t *b) {
+    for (int k = 0; k < 16; ++k) {
+        if (a[k] != b[k]) return false;
+        if (!a[k]) return true;
+    }
+    return true;
+}
+[[gnu::always_inline]] inline void slot_note(uint32_t i, const char *what) {
+    u3h_fj_note(what, nullptr, nullptr, static_cast<int32_t>(i));
+}
+// the joiner of this net player said it plays: its 0x1f1 "plays", or bit 7 in its party member data
+[[gnu::always_inline]] inline bool said_plays(uintptr_t base, const uint8_t *np) {
+    const uint8_t *const md = u3h_jip_party_md(base, np);
+    return (heard[0] && same_id(heard, np + 0x5b8)) || (md && (md[0x32] & MD_PLAYS));
+}
+}  // namespace jorder
+
+// host, every frame: park slots between the two steps until their joiner plays (see above)
+extern "C" U3X_FN [[clang::minsize]] void u3x_jip_order_host(uintptr_t base) {
+    using namespace jorder;
+    uint32_t *const st = reinterpret_cast<uint32_t *>(base + STATUS);
+    const uint32_t *const hd = reinterpret_cast<const uint32_t *>(base + HANDLES);
+    const uint32_t now = at<uint32_t>(base + CLOCK);
+    for (uint32_t i = 0; i < 12; ++i) {
+        if (st[i] != 2 && st[i] != PARKED) {
+            phase[i] = 0;
+            continue;
+        }
+        uint8_t *const np = u3x_jip_slot_player(base, hd[i]);
+        if (st[i] == PARKED && (!np || np[0x5e4])) {
+            st[i] = 0;
+            phase[i] = 0;
+            slot_note(i, t_gone);
+            continue;
+        }
+        if (!np) continue;
+        if (!phase[i]) {
+            phase[i] = 1;
+            since[i] = now;
+            ready_at[i] = 0;
+            st[i] = PARKED;
+            np[0x5ed] = 0;
+            slot_note(i, t_park);
+        } else if (phase[i] == 1) {
+            const bool word = said_plays(base, np);
+            // a joiner without this helper (PS3, RPCS3, an older PC helper) never says it plays: a ready not followed
+            // by the word within 6 s is its own (PS3 sends it from Playing) and is kept
+            if (!word && np[0x5ed] && !ready_at[i]) ready_at[i] = now | 1;
+            const bool alone = !word && ready_at[i] && now - ready_at[i] > READY_WAIT;
+            if (!word && !alone && now - since[i] <= PARK_MAX) continue;
+            if (word) {
+                np[0x5ed] = 0;
+                heard[0] = 0;
+            }
+            st[i] = 2;
+            phase[i] = 2;
+            since[i] = now;
+            slot_note(i, word ? t_go : t_old);
+        } else if (phase[i] == 2 && st[i] == 2 && !np[0x5ed] && now - since[i] > READY_MAX) {
+            np[0x5ed] = 1;
+            slot_note(i, t_late);
+        }
+    }
+}
+
+// joiner, every frame: "plays" is forgotten outside a match room; a late joiner in WaitReady goes on to Playing
+extern "C" U3X_FN [[clang::minsize]] void u3x_jip_order_joiner(uintptr_t base) {
+    using namespace jorder;
+    const uint8_t *const ms = reinterpret_cast<const uint8_t *>(base + MATCH);
+    if (!rd<uint64_t>(ms, 0x18) || rd<uint32_t>(ms, 0x12e4) == rd<uint32_t>(ms, 0x12e8)) {
+        plays = 0;
+        skipped = 0;
+        return;
+    }
+    if (at<int32_t>(base + STATUS) <= 3) return;
+    uint8_t *const *const handle = at<uint8_t *const *>(base + PROCESS);
+    const uint32_t id = at<uint32_t>(base + PROCESS + 8);
+    if (!handle || !id || !*handle || rd<uint32_t>(*handle, 0x7c) != id) return;
+    uint8_t *const p = *handle;
+    const uint8_t *const sm = rd<const uint8_t *>(p, 0x80);
+    const uint8_t *const clock = at<const uint8_t *>(base + NET_CLOCK);
+    if (!sm || !clock || rd<uintptr_t>(sm, 8) != base + WAIT_READY || p[0x1ad]) return;
+    *reinterpret_cast<uint32_t *>(p + 0x1b0) = rd<uint32_t>(clock, 0xc);
+    p[0x1ad] = 1;
+    if (!skipped) {
+        skipped = 1;
+        u3h_fj_note(t_skip, nullptr, nullptr, -1);
+    }
+}
+
+// joiner, on reaching Playing (net state 0x1d) as a late joiner: tell the match host; the message only to a helper
+// host (`tell_host`: its join info 0x1f0 came), as for 0x1f1
+extern "C" U3X_FN [[clang::minsize]] void u3x_jip_plays(uintptr_t base, int tell_host) {
+    using namespace jorder;
+    plays = 1;
+    u3h_fj_note(t_tell, nullptr, nullptr, -1);
+    uint8_t *const ps = reinterpret_cast<uint8_t *>(base + PARTY);
+    if (rd<uint64_t>(ps, 0x18)) u3x_fl_md(nullptr, ps);
+    uint8_t *const ms = reinterpret_cast<uint8_t *>(base + MATCH);
+    const uint8_t *const host = u3x_find_member(ms, rd<uint32_t>(ms, 0x12e8));
+    U3X_RO static const uint8_t one = 1;
+    if (tell_host && host) u3h_mq_send(base, host, MSG_JOINER, &one, 1);
+}
+
+// the member data bit of a late joiner in Playing (the C part's stamp)
+extern "C" U3X_FN uint8_t u3x_jip_md_bit(void) { return jorder::plays ? jorder::MD_PLAYS : 0; }
+
+// host: a joiner's 0x1f1 "plays" (the C part's message handler)
+extern "C" U3X_FN [[clang::minsize]] void u3x_jip_heard(const uint8_t *id) {
+    using namespace jorder;
+    for (int k = 0; k < 16; ++k) heard[k] = id[k];
+    u3h_fj_note(t_heard, id, nullptr, -1);
+}
