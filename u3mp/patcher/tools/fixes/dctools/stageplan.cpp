@@ -250,10 +250,12 @@ void make_res(const fs::path &out, const fs::path &pak_dir) {
     }
     std::sort(names.begin(), names.end());
     std::string mats, tex;
+    size_t read = 0;
     for (const std::string &fn : names) {
         try {
             const Pak q(pak_dir / upath(fn));
             mats += survey_line(q, fn) + "\n";
+            read++;
             for (const PakTexture &x : q.textures())
                 tex += fn + "\t" + bg::utf8_of(x.path) + "\t" + std::to_string(x.width) + "\t" + std::to_string(x.height) + "\t" + std::to_string(x.format) + "\t" +
                        std::to_string(x.mips) + "\t" + std::to_string(x.vramOffset) + "\t" + std::to_string(x.vramSize) + "\t0\t0\t0\r\n";
@@ -265,6 +267,9 @@ void make_res(const fs::path &out, const fs::path &pak_dir) {
             mats += l + "}\n";
         }
     }
+    // a survey without one readable retail pak has no templates: every converted level would fail with "no fallback
+    // material", and a written survey would be reused by every later import
+    if (!read) throw Stop("the PS4 game's level paks could not be read (" + utf8(pak_dir) + "): no material templates");
     fs::create_directories(out);
     const std::string gz = gzip_stored(mats);
     write_file_replace(out / "ps4mats.jsonl.gz", Bytes(gz.begin(), gz.end()));

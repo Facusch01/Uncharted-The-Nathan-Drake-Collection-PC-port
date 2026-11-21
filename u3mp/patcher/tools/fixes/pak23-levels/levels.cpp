@@ -102,9 +102,33 @@ std::shared_ptr<std::vector<stage::BundleTex>> default_lightmap_texels() {
     if (!v) v = std::make_shared<std::vector<stage::BundleTex>>(stage::default_lightmaps(ps4main() / "pak23" / "ps4"));
     return v;
 }
-fs::path res_dir() {   // the mkplan survey of the retail PS4 pak23
-    const fs::path d = g_tmp / "res";
-    if (!fs::exists(d / "ps4tex.tsv")) stage::make_res(d, ps4main() / "pak23" / "ps4");   // C++ (dctools/stageplan.cpp)
+// The mkplan survey of the retail PS4 pak23 (C++, dctools/stageplan.cpp), made again when it is missing or empty or the
+// retail paks changed (their names, sizes and times, in res/.paks): a survey made from an unreadable or incomplete PS4
+// folder had no templates, so every "stage" level failed with "no fallback material", import after import.
+fs::path res_dir() {
+    static std::mutex lock;
+    static bool checked = false;   // once per run
+    std::lock_guard<std::mutex> g(lock);
+    const fs::path d = g_tmp / "res", paks = ps4main() / "pak23" / "ps4";
+    if (checked) return d;
+    checked = true;
+    std::vector<std::string> sig;
+    std::error_code ec;
+    for (const auto &e : fs::directory_iterator(paks, ec)) {
+        struct _stat64 st;
+        if (_wstat64(e.path().wstring().c_str(), &st)) continue;
+        sig.push_back(fmt("%s %lld %lld", utf8(e.path().filename()).c_str(), (long long)st.st_size, (long long)st.st_mtime));
+    }
+    std::sort(sig.begin(), sig.end());
+    std::string s;
+    for (const std::string &x : sig) s += x + "\n";
+    const std::string stamp = sha256_hex(Bytes(s.begin(), s.end()));
+    const bool have = fs::exists(d / "ps4tex.tsv") && fs::file_size(d / "ps4tex.tsv", ec) > 0 && !ec &&
+                      fs::exists(d / "ps4mats.jsonl.gz") && fs::exists(d / ".paks") && py_rstrip(text_file(d / ".paks")) == stamp;
+    if (!have) {
+        stage::make_res(d, paks);
+        write_text(d / ".paks", stamp);
+    }
     return d;
 }
 
