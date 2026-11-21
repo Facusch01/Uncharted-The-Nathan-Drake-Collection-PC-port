@@ -13235,6 +13235,189 @@ extern "C" U3X_FN int u3x_anim_commands(uintptr_t base, const uint64_t *regs) {
 // ===== r2 end G51/part.cpp =====
 }  // namespace r2_G51
 
+// ===== v7.236: remote characters keep a real pose when a snapshot cannot be decoded =====
+// A remote character (another player, an NPC copy on a co-op guest) is posed every frame from the two snapshots of its
+// state that bracket the play time. When one of them cannot be decoded, u3x_anim_commands hands the frame to the game's
+// own CreateAnimCmds (0x6847d0). PS4 removed that function's decoder: it only emits the "ice this instance" commands, so
+// the anim job stores and blends an instance that nothing posed, and the character's mesh explodes into huge triangles or
+// collapses to a point until the snapshot is out of use. Here the frame is posed instead from the other snapshot alone
+// (the newer one first) or, when neither decodes, from the generator's own pose anim; the game's function runs only when
+// even that fails. The sender side: a snapshot carries its length in one byte (PS4 0x7185d8 keeps (bits + 7) / 8 as a
+// u8), so an own state over 255 bytes arrives cut short and cannot be decoded; it is sent empty instead.
+// boot.log: one line for the first error of each kind (decoder code 1..12, 13 = own state over 255 bytes), then a count
+// line every ~30 s while the counts change (20 lines at most).
+extern "C" int u3x_anim_commands(uintptr_t base, const uint64_t *regs);
+extern "C" int32_t u3h_pick_snapshot(uintptr_t base, uint8_t *generator, uint32_t *blend);
+extern "C" uint32_t u3x_anim_pack_body(uintptr_t base, uint8_t *msg, uint8_t *bs, uint8_t *actor, uint8_t **tabs,
+                                       int32_t param5, int32_t param6, uint8_t **buf);
+namespace netanim_safe {
+// v: the latest new kind of error (code, the try that posed the frame (0 = none), generator row (player 0, NPC 1..5; for
+// code 13 1 = player, 0 = NPC), the two snapshots' byte counts, the decoder's last bit), then the counts so far
+enum : uint32_t { CODE, USED, ROW, BYTES0, BYTES1, BIT, ERRORS, RECOVERED, NATIVE, BIG, FIELDS };
+struct State {
+    uint32_t v[FIELDS];
+    uint32_t seen, frame, lines, last;
+    uint8_t pending;
+};
+U3X_BSS State st;
+U3X_RO const char t_names[] = "U3MP netanim: decode error \0, posed by try \0, row \0, bytes \0/\0, bit \0; errors "
+                              "\0, recovered \0, to the game \0, own states over 255 bytes ";
+constexpr uint32_t CODE_BIG = 13, SNAPSHOT = 0x3f0, MAX_BYTES = 255;
+
+// the first error of each kind waits here for the next report
+U3X_FN [[clang::minsize]] void note(uint32_t code, uint32_t used, uint32_t row, const uint8_t *s0, uint32_t bit) {
+    if (code > 31 || (st.seen & (1u << code)) || st.pending) return;
+    st.v[CODE] = code;
+    st.v[USED] = used;
+    st.v[ROW] = row;
+    st.v[BYTES0] = s0 ? s0[0] : 0;
+    st.v[BYTES1] = s0 ? s0[SNAPSHOT] : 0;
+    st.v[BIT] = bit;
+    st.pending = 1;
+}
+}  // namespace netanim_safe
+
+// Diagnostic for a second possible cause: the generator's two ice copies are sized at its creation (PS4 0x682f0b..
+// 0x683233) by the counts of the character's skeleton then (joints x 0x30, float channels x 4, segments x 0x10 bytes);
+// the anim job stores and reads them with the skeleton it has now, so a skeleton that grows later overflows them. The
+// counts are noted at creation (kind 120) and compared on every CreateAnimCmds. A difference is noted once as kind 14,
+// whose fields read: "posed by try" = joints at creation, "row" = joints now, "bit" = channels at creation x 65536 +
+// channels now.
+namespace netanim_ice {
+constexpr uint32_t CODE_SKELETON = 14;
+struct Entry {
+    const uint8_t *object;
+    uint32_t counts;
+};
+U3X_BSS Entry table[32];
+
+// the counts the native creation sizes the ice copies by (joints, channels << 16), 0 when the chain is not there
+U3X_FN [[clang::minsize]] uint32_t counts(const uint8_t *generator, const uint8_t **object) {
+    const uint8_t *h = rd<const uint8_t *>(generator, 0x48);
+    const uint8_t *o = ptr_ok(h) ? rd<const uint8_t *>(h, 0) : nullptr;
+    if (!ptr_ok(o) || rd<uint32_t>(o, 0x7c) != rd<uint32_t>(generator, 0x50)) return 0;
+    *object = o;
+    const uint8_t *p = rd<const uint8_t *>(o, 0x138);   // anim controller, then +0x18, +0x18, +0x28: skeleton counts
+    for (uint32_t step = 0; step < 4; step++) {
+        if (!ptr_ok(p)) return 0;
+        if (step < 3) p = rd<const uint8_t *>(p, step < 2 ? 0x18 : 0x28);
+    }
+    return rd<uint16_t>(p, 0x0c) | static_cast<uint32_t>(rd<uint16_t>(p, 0x10)) << 16;
+}
+
+// one entry per character address (a later character at the same entry replaces it)
+[[gnu::always_inline]] inline Entry &entry(const uint8_t *object) {
+    return table[(reinterpret_cast<uintptr_t>(object) >> 4) % 32];
+}
+
+// on every CreateAnimCmds: the counts now against those at creation
+U3X_FN [[clang::minsize]] void check(const uint8_t *generator) {
+    if (netanim_safe::st.seen & (1u << CODE_SKELETON)) return;
+    const uint8_t *object = nullptr;
+    const uint32_t c = counts(generator, &object);
+    const Entry &e = entry(object);
+    if (!c || e.object != object || e.counts == c) return;
+    netanim_safe::note(CODE_SKELETON, e.counts & 0xffff, c & 0xffff, nullptr, (e.counts & 0xffff0000u) | c >> 16);
+}
+}  // namespace netanim_ice
+
+// kind 120 (generator creation), before the native sizes the ice copies
+extern "C" U3X_FN [[clang::minsize]] void u3x_ice_note(uint8_t *generator) {
+    using namespace netanim_ice;
+    const uint8_t *object = nullptr;
+    const uint32_t c = counts(generator, &object);
+    if (!c) return;
+    Entry &e = entry(object);
+    e.object = object;
+    e.counts = c;
+}
+
+// CreateAnimCmds value stub (kind 118): G51 first; when it gives the frame up, the snapshots alone, then the pose anim
+extern "C" U3X_FN [[clang::minsize]] int u3x_anim_commands_safe(uintptr_t base, const uint64_t *regs) {
+    using namespace netanim_safe;
+    using r2_G51::g51::field;
+    uint32_t *ec = r2_G51::g51::ec();
+    if (regs[4]) netanim_ice::check(reinterpret_cast<const uint8_t *>(regs[4]));
+    const uint32_t empty = ec[104], failed = ec[81];
+    if (u3x_anim_commands(base, regs)) return 1;
+    uint8_t *generator = reinterpret_cast<uint8_t *>(regs[4]);
+    uint8_t *commands = reinterpret_cast<uint8_t *>(regs[5]);
+    const uint32_t group = static_cast<uint32_t>(regs[7]), first = static_cast<uint32_t>(regs[3]);
+    if ((ec[0] & 0x200u) || !generator || !commands || group > 1) return 0;   // left to the game on purpose
+    // why G51 gave up (it put the command buffer and the ice copies back): 12 = empty snapshot, else its error code
+    const uint32_t code = ec[104] != empty ? 12 : ec[81] != failed ? ec[82] : 0;
+    const uint32_t bit = ec[101];   // where the failed decode stopped reading
+    st.v[ERRORS]++;
+
+    uint32_t blend;
+    const int32_t index = u3h_pick_snapshot(base, generator, &blend);
+    uint8_t *s0 = index == -1 ? nullptr : generator + 0xb0 + static_cast<intptr_t>(index) * SNAPSHOT;
+    const uint32_t pos = rd<uint32_t>(commands, 0x0c), top = rd<uint32_t>(commands, 0x10);
+    uint64_t ice[8];
+    for (int i = 0; i < 8; i++) ice[i] = rd<uint64_t>(generator, 8 + static_cast<uintptr_t>(i) * 8);
+    alignas(16) uint8_t visitor[0x160];
+    field<uint64_t>(visitor, 0x120) = base;
+    field<uint8_t *>(visitor, 0x128) = nullptr;   // entries
+    field<uint8_t *>(visitor, 0x130) = commands;
+    field<uint32_t>(visitor, 0x148) = 0;          // channel
+    field<int32_t>(visitor, 0x150) = 1;           // kind: commands
+
+    // try 1: the newer snapshot alone, 2: the older one alone, 3: the generator's pose anim
+    uint32_t t = s0 ? 1 : 3;
+    for (; t <= 3; t++) {
+        field<int32_t>(visitor, 0x154) = 0;
+        if (t < 3) {
+            uint8_t *s1 = s0 + SNAPSHOT;
+            r2_G51::g51::snapshot_step(visitor, generator, t == 1 ? s1 : s0, t == 1 ? s0 : s1, first, 0, group);
+        } else {
+            r2_G51::g51::pose_commands(base, visitor, generator, first);
+        }
+        if (!r2_G51::g51::error_of(visitor)) break;
+        field<uint32_t>(commands, 0x0c) = pos;
+        field<uint32_t>(commands, 0x10) = top;
+        for (int i = 0; i < 8; i++) field<uint64_t>(generator, 8 + static_cast<uintptr_t>(i) * 8) = ice[i];
+    }
+    const bool posed = t <= 3;
+    st.v[posed ? RECOVERED : NATIVE]++;
+    note(code, posed ? t : 0, rd<uint32_t>(generator, 0x60), s0, bit);
+    return posed ? 1 : 0;
+}
+
+// the packer (G49) behind a length check: a snapshot's length is one byte
+extern "C" U3X_FN [[clang::minsize]] uint32_t u3x_anim_pack_checked(uintptr_t base, uint8_t *msg, uint8_t *bs, uint8_t *actor,
+                                                                 uint8_t **tabs, int32_t p5, int32_t p6, uint8_t **buf) {
+    using namespace netanim_safe;
+    const uint32_t bits = u3x_anim_pack_body(base, msg, bs, actor, tabs, p5, p6, buf);
+    if (bits <= MAX_BYTES * 8) return bits;
+    st.v[BIG]++;
+    note(CODE_BIG, 0, static_cast<uint32_t>(p5), nullptr, bits);
+    return 0;
+}
+
+// once per frame from u3x_ring_tick: a new kind of error at once, else the counts every ~30 s while they change
+extern "C" U3X_FN [[clang::minsize]] void u3x_netanim_report(uintptr_t base, Log log) {
+    using namespace netanim_safe;
+    if (!log) return;
+    if (st.pending) {
+        st.pending = 0;
+        st.seen |= 1u << st.v[CODE];
+    } else {
+        const uint32_t sum = st.v[ERRORS] + st.v[BIG];
+        if (++st.frame % 1800u || st.lines >= 20 || sum == st.last) return;
+        st.last = sum;
+        st.lines++;
+    }
+    Line l;
+    const char *t = t_names;
+    for (uint32_t i = 0; i < FIELDS; i++) {
+        l.s(t).d(st.v[i]);
+        while (*t) t++;
+        t++;
+    }
+    log(base, l.z());
+}
+// ===== end remote characters keep a real pose =====
+
 namespace r2_G52 {
 // ===== r2 begin G52/part.cpp =====
 // G52: anim decoder visitors (written from spec G52_anim_visitors.md).
@@ -43821,12 +44004,14 @@ extern "C" U3X_FN [[clang::minsize]] int u3x_ring_draw(uintptr_t base, const uin
 
 extern "C" void u3x_pinfo_pull_tick(uintptr_t base, Log log);   // v7.225, below
 extern "C" void u3x_npc_spawn_report(uintptr_t base, Log log);   // v7.225, below
+extern "C" void u3x_netanim_report(uintptr_t base, Log log);   // v7.236, above
 
 // once per frame in a net game: a boot.log line every ~30 s when the counts changed (40 at most)
 extern "C" U3X_FN [[clang::minsize]] void u3x_ring_tick(uintptr_t base, Log log) {
     using namespace ring_tint;
     u3x_pinfo_pull_tick(base, log);   // v7.225: player infos asked for again (every frame, net game or not)
     u3x_npc_spawn_report(base, log);   // v7.225: NPC spawn events on guests (boot.log counts)
+    u3x_netanim_report(base, log);   // v7.236: remote characters posed when a snapshot cannot be decoded
     if (!at<uint8_t>(base + NET_GAME)) return;
     if (!(n32_switches() & 8u) || ++st.frame % 1800u || st.lines >= 40 || !log) return;
     if (st.drawables == st.last_drawables && st.draws == st.last_draws && st.fixes == st.last_fixes) return;

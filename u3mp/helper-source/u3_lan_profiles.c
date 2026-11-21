@@ -408,6 +408,8 @@ __attribute__((visibility("hidden"))) void u3x_bookmark_move(uint8_t *d,const ui
 __attribute__((visibility("hidden"))) void u3x_bookmark_create(uintptr_t base,uint8_t *bm,int32_t t);
 /* v7.147: part 8 (u3x_fixes.cpp) */
 __attribute__((visibility("hidden"))) int u3x_anim_commands(uintptr_t base,const uint64_t *regs);
+__attribute__((visibility("hidden"))) int u3x_anim_commands_safe(uintptr_t base,const uint64_t *regs);   /* v7.236 C++: G51, then one snapshot alone or the pose anim */
+__attribute__((visibility("hidden"))) void u3x_ice_note(uint8_t *g);   /* v7.236 C++: generator ice copy sizes (diagnostic) */
 __attribute__((visibility("hidden"))) void u3x_frame_make(uint8_t *bf,const uint8_t *local);
 __attribute__((visibility("hidden"))) void u3x_frame_identity(uint8_t *bf);
 __attribute__((visibility("hidden"))) void u3x_frame_parent(uintptr_t base,uint8_t *bf);
@@ -849,6 +851,7 @@ __attribute__((visibility("hidden"))) uint8_t *u3x_art_tab(uint8_t *g);
 __attribute__((visibility("hidden"))) uint32_t u3x_sid(uintptr_t base,const char *s);
 __attribute__((visibility("hidden"))) int u3x_anim_lookup(uintptr_t base,uint32_t *tab,int32_t *idx,uint32_t id,uint8_t *anim,uint8_t **tabs);
 __attribute__((visibility("hidden"))) uint8_t *u3x_stream_root(uintptr_t base,uint8_t *x,uint32_t *phase);
+__attribute__((visibility("hidden"))) uint32_t u3x_anim_pack_checked(uintptr_t base,uint8_t *msg,uint8_t *bs,uint8_t *actor,uint8_t **tabs,int32_t p5,int32_t p6,uint8_t **buf);   /* v7.236 C++: a snapshot over 255 bytes is sent empty */
 __attribute__((visibility("hidden"))) uint32_t u3x_anim_pack_body(uintptr_t base,uint8_t *msg,uint8_t *bs,uint8_t *actor,uint8_t **tabs,int32_t p5,int32_t p6,uint8_t **buf);
 __attribute__((visibility("hidden"))) uint8_t *u3x_s16_char(uintptr_t base,uint8_t *cm);
 __attribute__((visibility("hidden"))) int u3x_s17_apply(uintptr_t base,uint8_t *cm,int own_kill);

@@ -257,7 +257,7 @@ static uint32_t anim_pack_body119(uintptr_t base,uint8_t *msg,uint8_t *bs,uint8_
 static uint32_t anim_pack119(uintptr_t base,uint8_t *msg,uint8_t *bs,uint8_t *actor,uint8_t **tabs,int param5,int param6){
  uint8_t *buf=0;return anim_pack_body119(base,msg,bs,actor,tabs,param5,param6,&buf);}   /* v7.98: buf is kept */
 static uint32_t anim_pack_body119(uintptr_t base,uint8_t *msg,uint8_t *bs,uint8_t *actor,uint8_t **tabs,int param5,int param6,uint8_t **buf){
- return u3x_anim_pack_body(base,msg,bs,actor,tabs,param5,param6,buf);}   /* v7.212 C++ */
+ return u3x_anim_pack_checked(base,msg,bs,actor,tabs,param5,param6,buf);}   /* v7.212 C++, v7.236 length check */
 /* 1.19 f_2cf964(msg, player): weapons. Player+0x520 (PS3 +0x3d8) vt+0x70 (PS3 vt+0x38) = weapon in slot i (as PS4 0x78bbb7);
  * weapon item id +0x6ec (PS3 +0x568, f_6dd758), +0x6f0 (+0x56c), +0x6f2 (+0x56e), vt+0x438 (PS3 vt+0x210), vt+0x398
  * (vt+0x1c4): the gun vtable 0x16af910 lines up with PS3 0x1102218 entry by entry, PS4 inserts one virtual at 0x430; the
@@ -424,7 +424,7 @@ EXT static void apply_dec119(uintptr_t base,uint64_t *regs){
  * ecx proc group, r8d instance base) = 1.19 f_2a1248(gen, cmds, group, base). Returns 0 (PS4's native runs) when off or
  * when a PS3 trap would fire (buffer, ice snapshots restored first). ---- */
 EXT static int cac119(uintptr_t base,uint64_t *regs){
- return u3x_anim_commands(base,regs);}   /* v7.147 C++ */
+ return u3x_anim_commands_safe(base,regs);}   /* v7.147 C++, v7.236 no fall-back to the decoder-less native */
 /* ---- kind 119: GetLocator 0x684cf0 entry (value stub; rdi out, rsi gen, edx channel) = 1.19 f_2a0fac(out, gen, channel):
  * locator visitor over the snapshot pair (args 0,0 / 1,1), then f_29904 (pos lerp, quat slerp) through 0xfd3c60 on
  * {pos; quat; 0} (f_29904 and f_7eca54 both lerp the vector and slerp the quat with f_a82dbc). Returns out in rax. ---- */
@@ -434,6 +434,7 @@ EXT static int gloc119(uintptr_t base,uint64_t *regs){
  * 0x29f8a8..0x29f8d8: tables[i] = f_3868f0(+0x38 row, i). NPC generators (0x339ad0 -> 0x33b9a0, stored at char+0x3d8)
  * and NetCharacters (0x68fbe0 -> 0x33b9a0, +0x400) both come here. ---- */
 EXT static void gen_tables119(uintptr_t base,uint8_t *g){
+ u3x_ice_note(g);   /* v7.236 C++: ice copy sizes noted (diagnostic) */
  if(X.ec[0]&1024)return;
  uint32_t row=*(uint32_t*)(g+0x60),got=u3x_anim_tables(base,g,net_ag119);   /* v7.113 C++ */
  X.ec[88]++;X.ec[89]=(X.ec[89]&0x80000000u)|row<<8|got;}
