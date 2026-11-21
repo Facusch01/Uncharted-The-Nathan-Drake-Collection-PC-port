@@ -35,6 +35,10 @@ Output: `<out>/work/overlay-*` (the overlays), `<out>/work/backup-*` (what the f
 `<out>/scratch/<job>` (rendered job folders), `<out>/_recipe/state.json` + `log.txt`. Re-running on the
 same `--out` skips steps whose recorded outputs are unchanged and steps whose files already equal
 the reference manifest, so updates are incremental. ffmpeg for the steps that say so (`--list`, `needs`).
+A step runs again when its code changes (its fingerprint); a step with `"fingerprint_inputs": ["data2/net18.bin"]`
+also when that input file of the player changes (1.28.0: `netgame-order-119` and `booster-table`, whose result
+follows the server's net18.bin). With a community server DNS the import downloads the server's current game data
+(DATA2) at every import and update, so every PC converts the same version (same net game order, issue 92).
 
 Hidden files (1.8.0): the game loads the overlays first-wins (r3, r2, port, mp), so a level or actor pak of a
 lower overlay with the same path as one in a higher overlay is never read. 740 manifest files are hidden that way

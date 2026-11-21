@@ -472,12 +472,14 @@ std::string Inputs::describe() const {
 // ------------------------------------------------------------------------------------------------ input checks
 namespace {
 std::set<std::string> accepted_net18_sha256() {
-    // the net18.bin versions the DC recipes accept (tools/dcconv/net18-versions.json), else the one they were made from
+    // the net18.bin versions the DC recipes accept (tools/dcconv/net18-versions.json, "accepted": {sha256: text}),
+    // else the one they were made from. The keys are the versions; a list of them is read too.
     std::set<std::string> out;
     if (auto v = try_json(tools_dir() / "dcconv" / "net18-versions.json"))
         if (const Value *a = v->get("accepted")) {
+            for (const auto &f : a->fields) out.insert(f.first);
             for (const Value &x : a->items) out.insert(x.s);
-            return out;
+            if (!out.empty()) return out;
         }
     try {
         const std::string gz = read_text(tools_dir() / "dcconv" / "dc-recipes.json.gz");
@@ -525,9 +527,10 @@ std::vector<std::string> full_import_problems(Inputs &inp) {
     note_read(d2 / "net18.bin");
     const std::string have = sha256_file(d2 / "net18.bin");
     if (!want.empty() && !want.count(have))
-        out.push_back("the game data folder " + S(d2) + " holds a net18.bin version this recipe does not know yet (sha256 " + have +
-                      "): the menus and modes cannot be converted from it. Report this hash so the version can be added; until then Uncharted 3 "
-                      "starts without multiplayer.");
+        out.push_back("the game data folder " + S(d2) + " holds a net18.bin version this recipe does not know (sha256 " + have +
+                      "): the menus and modes cannot be converted from it. Enter the community server DNS in \"Set up multiplayer\" and "
+                      "import again: the import then downloads the server's current game data. If that one is new too, report this hash so "
+                      "the version can be added; until then Uncharted 3 starts without multiplayer.");
     return out;
 }
 
@@ -692,7 +695,11 @@ std::string lf_sha_raw(const fs::path &p) {
     return std::string(d.begin(), d.end());
 }
 
-std::string step_fingerprint(const Value &s) {
+// "fingerprint_inputs": ["data2/net18.bin", ...]: input files whose content the step's result depends on (kind/path of
+// the PS3 input folders); their sha256 joins the fingerprint, so the step runs again when the player's input changes
+// (netgame-order-119 and booster-table follow the server's net18.bin: a newer one gives another net game order).
+// Without inputs (the recipe's shipped fingerprints) only the code counts.
+std::string step_fingerprint(const Value &s, const Inputs *inp) {
     Value c = Value::object();
     for (const auto &[k, v] : s.fields)
         if (k.empty() || k[0] != '_') c.set(k, v);
@@ -713,6 +720,15 @@ std::string step_fingerprint(const Value &s) {
             h.update(d.data(), d.size());
         }
     }
+    if (inp)
+        for (const auto &x : val_list(s, "fingerprint_inputs")) {
+            const size_t k = x.find('/');
+            if (k == std::string::npos) continue;
+            const auto it = inp->ps3.find(x.substr(0, k));
+            const fs::path p = it == inp->ps3.end() ? fs::path() : it->second / P(x.substr(k + 1));
+            const std::string d = x + "=" + (!p.empty() && present(p) ? sha256_file(p) : std::string("-"));
+            h.update(d.data(), d.size());
+        }
     return h.hex();
 }
 
@@ -1219,7 +1235,7 @@ int rebuild_overlays(const RecipeArgs &a, const std::function<void(const std::st
             continue;
         }
         Value *rec = state.done(sid);
-        const std::string fp = step_fingerprint(s);
+        const std::string fp = step_fingerprint(s, &inp);
         if (rec && !rec->get("fp") && val_s(*rec, "status") == "ok") {
             rec->set("fp", str(fp));   // recorded by recipe <= 1.7.0 (no fingerprints)
             state.save();
@@ -1302,7 +1318,7 @@ int rebuild_overlays(const RecipeArgs &a, const std::function<void(const std::st
 namespace u3imp {
 std::vector<std::pair<std::string, std::string>> step_fingerprints() {
     std::vector<std::pair<std::string, std::string>> out;
-    for (const Value &s : load_steps([](const std::string &) {})) out.push_back({val_s(s, "id"), step_fingerprint(s)});
+    for (const Value &s : load_steps([](const std::string &) {})) out.push_back({val_s(s, "id"), step_fingerprint(s, nullptr)});
     return out;
 }
 }  // namespace u3imp

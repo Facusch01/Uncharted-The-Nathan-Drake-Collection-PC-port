@@ -194,39 +194,68 @@ std::string fetch_data2(const std::string &dns, const std::string &ps3_elf, cons
 }
 
 // The game-data folder (net18.bin, the Lab maps, text, EULA pages: what Uncharted 3 writes to
-// dev_hdd0/game/BCES01670DATA2 when it goes online in RPCS3): the player's RPCS3 folder, or the copy in
-// <data>/ps3-data2. When neither is complete and current and a community server DNS is set (--dns: the "Set up
-// multiplayer" DNS field, shared with the RPCN section), the online program downloads it into <data>/ps3-data2.
-// Without a DNS a missing or incomplete folder is reported by the recipe's input check, which tells the player what to
-// do. Returns "" (the import goes on), or why the download did not give a usable folder.
+// dev_hdd0/game/BCES01670DATA2 when it goes online in RPCS3). With a community server DNS (--dns: the "Set up
+// multiplayer" DNS field, shared with the RPCN section) the online program downloads the server's current one at every
+// import and update, as the game reads it each time it goes online, into <data>/ps3-data2: every PC then converts the
+// same version and gets the same net game order (an RPCS3 folder or an earlier download may hold an older one: issue
+// 92). It goes to a new folder that replaces the old copy only when it is usable. Without a DNS, or when the download
+// fails, the copy in <data>/ps3-data2 or the player's RPCS3 folder is used; a missing, incomplete or unknown one is
+// reported by the recipe's input check, which tells the player what to do. Returns "" (the import goes on), or why
+// there is no usable folder although a download was tried.
 std::string ensure_data2(Args &a, const fs::path &data, const std::string &ps3_elf) {
     const fs::path own = data / "ps3-data2", usrdir = own / DATA2_ID / "USRDIR";
-    if (present(usrdir / "net18.bin") && data2_problems({S(own)}).empty()) {
-        a.ps3_u3.insert(a.ps3_u3.begin(), S(own));   // downloaded earlier (or left by an earlier launcher version)
-        log("game data: using the copy already on this PC (" + S(usrdir) + ")");
-        return "";
+    const std::string dns = strip(a.dns);
+    std::string failed;   // why the download gave no usable folder
+    if (!dns.empty()) {
+        log("game data: downloading the server's current game data through the community server DNS, as Uncharted 3 "
+            "does when it goes online");
+        ev(obj({{"phase", str("data2")}, {"status", str("running")}, {"note", str("Downloading the game data...")}}));
+        const fs::path fresh = data / "ps3-data2-new", got = fresh / DATA2_ID / "USRDIR" / "net18.bin";
+        std::error_code ec;
+        fs::remove_all(fresh, ec);
+        const std::string why = fetch_data2(dns, ps3_elf, fresh / DATA2_ID);
+        const std::vector<std::string> left =
+            present(got) ? data2_problems({S(fresh)}) : std::vector<std::string>{"no net18.bin was downloaded"};
+        if (present(got) && left.empty()) {
+            ec.clear();
+            fs::remove_all(own / DATA2_ID, ec);
+            fs::create_directories(own, ec);
+            ec.clear();
+            fs::rename(fresh / DATA2_ID, own / DATA2_ID, ec);
+            if (!ec && present(usrdir / "net18.bin")) {
+                std::error_code e2;
+                fs::remove_all(fresh, e2);
+                a.ps3_u3.insert(a.ps3_u3.begin(), S(own));
+                ev(obj({{"phase", str("data2")}, {"status", str("ok")}, {"note", str("Game data downloaded.")}}));
+                log("game data: downloaded to " + S(usrdir) + (why.empty() ? "" : " (but: " + why + ")"));
+                return "";
+            }
+            failed = "the download could not replace " + S(own / DATA2_ID) + (ec ? " (" + ec.message() + ")" : "");
+        } else {
+            std::vector<std::string> parts;
+            if (!why.empty()) parts.push_back(why);
+            parts.insert(parts.end(), left.begin(), left.end());
+            failed = join(parts, " / ");
+        }
+        fs::remove_all(fresh, ec);
+        ev(obj({{"phase", str("data2")}, {"status", str("failed")}, {"note", str(cut(failed, 300))}}));
+        log("game data: the download gave no usable folder (" + cut(failed, 500) + "); using what is on this PC");
+    }
+    if (present(usrdir / "net18.bin")) {
+        const std::vector<std::string> stale = data2_problems({S(own)});
+        if (stale.empty()) {
+            a.ps3_u3.insert(a.ps3_u3.begin(), S(own));   // downloaded earlier (or left by an earlier launcher version)
+            log("game data: using the copy already on this PC (" + S(usrdir) + ")");
+            return "";
+        }
+        // an earlier download the recipe cannot use (for example a net18.bin version it does not know)
+        log("game data: the copy on this PC is not used: " + join(stale, " / "));
     }
     const std::vector<std::string> problems = data2_problems(a.ps3_u3);
     if (problems.empty()) return "";
     log("game data: " + join(problems, " / "));
-    if (strip(a.dns).empty()) return "";
-    log("game data: downloading it through the community server DNS, as Uncharted 3 does when it goes online");
-    ev(obj({{"phase", str("data2")}, {"status", str("running")}, {"note", str("Downloading the game data...")}}));
-    const std::string why = fetch_data2(strip(a.dns), ps3_elf, own / DATA2_ID);
-    const std::vector<std::string> left = present(usrdir / "net18.bin") ? data2_problems({S(own)}) : std::vector<std::string>{};
-    if (present(usrdir / "net18.bin") && left.empty()) {
-        a.ps3_u3.insert(a.ps3_u3.begin(), S(own));
-        ev(obj({{"phase", str("data2")}, {"status", str("ok")}, {"note", str("Game data downloaded.")}}));
-        log("game data: downloaded to " + S(usrdir) + (why.empty() ? "" : " (but: " + why + ")"));
-        return "";
-    }
-    std::vector<std::string> parts;
-    if (!why.empty()) parts.push_back(why);
-    parts.insert(parts.end(), left.begin(), left.end());
-    std::string w = join(parts, " / ");
-    if (w.empty()) w = "nothing was downloaded";
-    ev(obj({{"phase", str("data2")}, {"status", str("failed")}, {"note", str(cut(w, 300))}}));
-    return "the game data download through the community server DNS did not give a usable folder (" + cut(w, 500) +
+    if (dns.empty()) return "";
+    return "the game data download through the community server DNS did not give a usable folder (" + cut(failed, 500) +
            "). Check the DNS in \"Set up multiplayer\" and import again";
 }
 
