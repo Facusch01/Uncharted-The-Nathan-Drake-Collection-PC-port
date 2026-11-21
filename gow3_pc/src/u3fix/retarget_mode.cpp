@@ -18,6 +18,10 @@
 #include <cstring>
 #include <thread>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 namespace u3fix {
 
 namespace {
@@ -33,11 +37,25 @@ unsigned char *list_entry(unsigned char *image, uint32_t i) {
     return e;
 }
 
+// The fixes are installed before the image's last segments are mapped: the table, the count and the net-game flag are
+// in the zero-filled part of the data segment, which can still be unmapped when the thread first looks (a read fault at
+// image + 0x1c0a480 a few seconds after the start). The thread reads them only once their pages are committed.
+bool committed(const unsigned char *p) {
+#ifdef _WIN32
+    MEMORY_BASIC_INFORMATION info;
+    if (!VirtualQuery(p, &info, sizeof info) || info.State != MEM_COMMIT) return false;
+    return !(info.Protect & (PAGE_NOACCESS | PAGE_GUARD));
+#else
+    return p != nullptr;
+#endif
+}
+
 void watch(unsigned char *image) {
     uint32_t saved[kMaxEntries] = {};
     bool multiplayer = false;
     for (;;) {
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        if (!committed(image + kCount) || !committed(image + kNetGame) || !committed(image + kTable)) continue;
         const uint32_t count = read32(image + kCount);
         if (count == 0 || count > kMaxEntries) continue;
         const bool net = image[kNetGame] != 0;

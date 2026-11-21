@@ -82,6 +82,7 @@ bool settle_negative(const unsigned char *counter, int64_t target, const uint64_
 
 __attribute__((sysv_abi)) void counter_wait_sleep(const unsigned char *counter, int64_t target, int mode,
                                                   const uint64_t *frame) {
+    settle_requested_counters();   // on this thread: it holds no job system lock
     if (settle_negative(counter, target, frame)) return;   // the loop sees 0 and ends
     using clock = std::chrono::steady_clock;
     thread_local const unsigned char *waiting_on = nullptr;
@@ -146,6 +147,7 @@ struct JobWait {
     int mode = 0;
     std::chrono::steady_clock::time_point since;
     bool reported = false;
+    bool settle_asked = false;
     char chain[256] = {};
 };
 JobWait g_job_waits[128];
@@ -195,6 +197,7 @@ __attribute__((sysv_abi)) int job_counter_wait(const unsigned char *counter, int
         slot->mode = mode;
         slot->since = std::chrono::steady_clock::now();
         slot->reported = false;
+        slot->settle_asked = false;
         describe(slot->chain, sizeof slot->chain, frame);
     }
     unlock_waits();
@@ -207,19 +210,31 @@ void check_job_waits() {
         const auto now = std::chrono::steady_clock::now();
         lock_waits();
         for (JobWait &w : g_job_waits) {
-            if (!w.counter || w.reported) continue;
+            if (!w.counter) continue;
             int64_t value = 0;
             if (reached(w.counter, w.target, w.mode, value)) { w.counter = nullptr; continue; }
-            if (now - w.since < std::chrono::seconds(3)) continue;
+            const auto age = now - w.since;
+            // the safety net: a wait for 0 (or for at most 0 or more) on a counter above 0 that no submitted job is
+            // left to lower, with every queue empty and the frame stopped for 3 s, can't end; it is settled (after the
+            // report below, so the report keeps what the freeze looked like)
+            const bool for_zero = (w.mode == 0 && w.target == 0) || (w.mode == 1 && w.target >= 0);
+            if (!w.settle_asked && age >= std::chrono::seconds(4) && for_zero && value > 0 &&
+                counter_pending_jobs(w.counter) == 0 && job_queues_empty() && ms_since_frame() >= 3000) {
+                w.settle_asked = true;
+                request_counter_settle(w.counter, w.chain);
+            }
+            if (w.reported || age < std::chrono::seconds(3)) continue;
             w.reported = true;
             char queues[128], story[768];
             job_queue_counts(queues, sizeof queues);
             counter_story(w.counter, story, sizeof story);
-            std::printf("Uncharted 3: job waiting over 3 s: counter %p value %lld, waiting for %s %lld; callers%s; "
-                        "jobs queued per priority: %s; history: %s\n",
+            std::printf("Uncharted 3: job waiting over 3 s: counter %p value %lld, waiting for %s %lld; jobs submitted "
+                        "on it and not finished: %d; callers%s; jobs queued per priority: %s; history: %s\n",
                         static_cast<const void *>(w.counter), static_cast<long long>(value),
-                        w.mode == 1 ? "at most" : "exactly", static_cast<long long>(w.target), w.chain, queues, story);
+                        w.mode == 1 ? "at most" : "exactly", static_cast<long long>(w.target),
+                        counter_pending_jobs(w.counter), w.chain, queues, story);
             std::fflush(stdout);
+            dump_job_waits("a wait over 3 s");
         }
         unlock_waits();
     }

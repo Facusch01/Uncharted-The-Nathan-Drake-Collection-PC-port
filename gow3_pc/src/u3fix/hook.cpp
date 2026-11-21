@@ -3,6 +3,7 @@
 #include "u3fix_hook.h"
 
 #include <climits>
+#include <cstdio>
 #include <cstring>
 
 #ifdef _WIN32
@@ -50,6 +51,37 @@ unsigned char *stub_page_near(const unsigned char *image, uint64_t size) {
         pool_used = 1;
         return pool;
     }
+    // no free 64 KiB block in range: print what fills it, once (the fixes that need a stub are then not installed)
+    static bool reported = false;
+    if (!reported) {
+        reported = true;
+        uint64_t free_total = 0, free_largest = 0, by_type[3] = {};
+        unsigned regions = 0;
+        std::printf("u3fix: no stub page within range of the image %p (range %#llx..%#llx); largest allocations:\n",
+                    static_cast<const void *>(image), static_cast<unsigned long long>(lo),
+                    static_cast<unsigned long long>(hi));
+        for (uintptr_t a = lo; a < hi && VirtualQuery(reinterpret_cast<void *>(a), &info, sizeof info);
+             a = reinterpret_cast<uintptr_t>(info.BaseAddress) + info.RegionSize) {
+            regions++;
+            if (info.State == MEM_FREE) {
+                free_total += info.RegionSize;
+                if (info.RegionSize > free_largest) free_largest = info.RegionSize;
+                continue;
+            }
+            const unsigned t = info.Type == MEM_IMAGE ? 0 : info.Type == MEM_MAPPED ? 1 : 2;
+            by_type[t] += info.RegionSize;
+            if (info.RegionSize >= 0x4000000)   // 64 MiB and more
+                std::printf("u3fix:   %p allocation %p size %#llx %s %s\n", info.BaseAddress, info.AllocationBase,
+                            static_cast<unsigned long long>(info.RegionSize),
+                            info.State == MEM_COMMIT ? "committed" : "reserved",
+                            t == 0 ? "image" : t == 1 ? "mapped" : "private");
+        }
+        std::printf("u3fix:   %u regions; free %#llx (largest %#llx); image %#llx, mapped %#llx, private %#llx\n",
+                    regions, static_cast<unsigned long long>(free_total), static_cast<unsigned long long>(free_largest),
+                    static_cast<unsigned long long>(by_type[0]), static_cast<unsigned long long>(by_type[1]),
+                    static_cast<unsigned long long>(by_type[2]));
+        std::fflush(stdout);
+    }
     return nullptr;
 #else
     (void)size;
@@ -87,10 +119,14 @@ extern "C" int u3fix_install(unsigned char *image, uint64_t size) {
     int applied = 0;
     applied += u3fix::raise_net_process_pool(image, size) ? 1 : 0;
     applied += u3fix::install_package_log(image, size) ? 1 : 0;
+    applied += u3fix::install_job_trace(image, size) ? 1 : 0;
+    applied += u3fix::install_job_waits(image, size) ? 1 : 0;
+    applied += u3fix::install_counter_release(image, size) ? 1 : 0;
     applied += u3fix::install_counter_wait_log(image, size) ? 1 : 0;
     applied += u3fix::install_job_queue_full_log(image, size) ? 1 : 0;
     applied += u3fix::install_audio_mix_direct(image, size) ? 1 : 0;
     applied += u3fix::install_cmdbuf_borrow(image, size) ? 1 : 0;
+    applied += u3fix::install_particle_jobs_wait(image, size) ? 1 : 0;
     applied += u3fix::install_script_errors_log(image, size) ? 1 : 0;
     applied += u3fix::install_sid_names(image, size) ? 1 : 0;
     applied += u3fix::install_retarget_log(image, size) ? 1 : 0;

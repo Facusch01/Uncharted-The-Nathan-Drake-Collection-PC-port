@@ -34,6 +34,25 @@ bool install_sid_names(unsigned char *image, uint64_t size);
 bool install_retarget_log(unsigned char *image, uint64_t size);
 // skeleton retargets switch to their multiplayer settings while a net game runs, as on PS3 (retarget_mode.cpp)
 bool install_retarget_mode(unsigned char *image, uint64_t size);
+// the jobs that wait for counters before they may start, printed when a wait does not end (job_waits.cpp)
+bool install_job_waits(unsigned char *image, uint64_t size);
+void dump_job_waits(const char *why);
+// the particle renderer waits for its jobs before its job checks and before it gives their counters back (particle_jobs.cpp)
+bool install_particle_jobs_wait(unsigned char *image, uint64_t size);
+// a job counter given back while its jobs still run is kept out of the pool until they are done (counter_release.cpp)
+bool install_counter_release(unsigned char *image, uint64_t size);
+// a job that lowers this counter finished (called from job_trace's hook on the lowering)
+void counter_job_finished(const void *counter);
+// the jobs submitted on this counter that have not finished (-1 when it is not a pool counter)
+int counter_pending_jobs(const void *counter);
+// every priority queue of the job system is empty
+bool job_queues_empty();
+// asks for a stuck counter to be set to 0 and its waiting jobs released (done by settle_requested_counters)
+void request_counter_settle(const unsigned char *counter, const char *chain);
+// runs the requested settles: called on a game thread that holds no job system lock (counter_wait_log.cpp)
+void settle_requested_counters();
+// milliseconds since the particle renderer's game-jobs check last ran (once a frame); -1 before the first
+int64_t ms_since_frame();
 // every job counter's history: maker, job count, jobs finished (job_trace.cpp)
 bool install_job_trace(unsigned char *image, uint64_t size);
 void counter_story(const void *counter, char *out, size_t size);

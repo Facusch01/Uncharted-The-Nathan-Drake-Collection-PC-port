@@ -111,17 +111,38 @@ __attribute__((sysv_abi)) void counter_made(const void *counter, int64_t initial
     unlock();
 }
 
+// A counter given back to the pool while its value is not 0 still has jobs that will lower it: once the pool hands it
+// out again, those jobs lower the next owner's count (a negative counter, or a wait that ends too early). Reported with
+// who frees it, its value and its life so far.
+std::atomic<unsigned> g_early_frees{0};
+
 __attribute__((sysv_abi)) void counter_freed(const void *counter, uint64_t ret) {
+    const int64_t value =
+        __atomic_load_n(reinterpret_cast<const int64_t *>(static_cast<const unsigned char *>(counter) + 0x20),
+                        __ATOMIC_ACQUIRE);
     lock();
     CounterStory &s = find(counter);
-    if (s.counter == counter) {
+    const bool known = s.counter == counter;
+    if (known) {
         s.freed = true;
         s.freer = guest(ret);
     }
+    const CounterStory copy = known ? s : CounterStory{};
     unlock();
+    if (value == 0) return;
+    const unsigned n = ++g_early_frees;
+    if (n > 60 && n % 500) return;
+    std::printf("Uncharted 3: job counter %p freed with value %lld at guest %#llx: made at guest %#llx for %lld jobs, "
+                "%lld finished, last lowered %lld ms ago (time %u)\n",
+                counter, static_cast<long long>(value), static_cast<unsigned long long>(guest(ret)),
+                static_cast<unsigned long long>(copy.creator), static_cast<long long>(copy.initial),
+                static_cast<long long>(copy.finished),
+                static_cast<long long>(copy.last_ms ? now_ms() - copy.last_ms : -1), n);
+    std::fflush(stdout);
 }
 
 __attribute__((sysv_abi)) void counter_lowered(const void *counter, int64_t before, uint64_t job, uint64_t list) {
+    counter_job_finished(counter);
     lock();
     CounterStory &s = find(counter);
     if (s.counter != counter) {   // made before the trace saw it
@@ -137,7 +158,33 @@ __attribute__((sysv_abi)) void counter_lowered(const void *counter, int64_t befo
     s.finished++;
     s.last_before = before;
     s.last_ms = now_ms();
+    const CounterStory copy = s;
     unlock();
+    // A job that takes its counter below 0 lowers a counter that is not (or no longer) its own: print what it is. The
+    // job system's current job and its list are guest objects; their first words hold the entry point and its data.
+    if (before > 0) return;
+    static std::atomic<unsigned> reports{0};
+    const unsigned n = ++reports;
+    if (n > 80 && n % 200) return;
+    auto words = [](uint64_t p, uint64_t *out) {
+        for (int i = 0; i < 4; i++) out[i] = 0;
+        if (p < 0x1000000000ull || p >= 0x1300000000ull) return false;
+        std::memcpy(out, reinterpret_cast<const void *>(p), 4 * sizeof(uint64_t));
+        return true;
+    };
+    uint64_t j[4], l[4];
+    words(job, j);
+    words(list, l);
+    std::printf("Uncharted 3: job counter %p lowered to %lld by job %#llx [%#llx %#llx %#llx %#llx] list %#llx "
+                "[%#llx %#llx %#llx %#llx]; counter made at guest %#llx for %lld jobs, %lld finished (time %u)\n",
+                counter, static_cast<long long>(before - 1), static_cast<unsigned long long>(job),
+                static_cast<unsigned long long>(guest(j[0])), static_cast<unsigned long long>(guest(j[1])),
+                static_cast<unsigned long long>(guest(j[2])), static_cast<unsigned long long>(guest(j[3])),
+                static_cast<unsigned long long>(list), static_cast<unsigned long long>(guest(l[0])),
+                static_cast<unsigned long long>(guest(l[1])), static_cast<unsigned long long>(guest(l[2])),
+                static_cast<unsigned long long>(guest(l[3])), static_cast<unsigned long long>(copy.creator),
+                static_cast<long long>(copy.initial), static_cast<long long>(copy.finished), n);
+    std::fflush(stdout);
 }
 
 // mov [rbx+0x18],rdx (rdtsc); xchg r13,[rbx+0x20]; mov [rbp-0x38],r13; mov rax,[rbp-0x38]
