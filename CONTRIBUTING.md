@@ -6,7 +6,7 @@ Thank you for helping improve the project. Read the
 The rules below are ordered by priority: **legal and distribution requirements come first**, followed by
 the contribution process and development priorities. Every contribution must follow all applicable rules.
 
-## ⚖️ 1. Legal and distribution requirements — highest priority
+## ⚖️ 1. Legal and distribution requirements — HIGHEST PRIORITY!
 
 This is an unofficial, non-commercial fan project, not affiliated with Sony Interactive Entertainment,
 Naughty Dog or Bluepoint Games. These requirements protect the project and take priority over convenience,
