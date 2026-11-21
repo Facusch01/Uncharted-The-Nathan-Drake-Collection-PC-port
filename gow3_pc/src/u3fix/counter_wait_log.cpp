@@ -82,6 +82,7 @@ bool settle_negative(const unsigned char *counter, int64_t target, const uint64_
 
 __attribute__((sysv_abi)) void counter_wait_sleep(const unsigned char *counter, int64_t target, int mode,
                                                   const uint64_t *frame) {
+    settle_stuck_counters();   // the ones the checker below asked for: this thread holds no job system lock
     if (settle_negative(counter, target, frame)) return;   // the loop sees 0 and ends
     using clock = std::chrono::steady_clock;
     thread_local const unsigned char *waiting_on = nullptr;
@@ -207,10 +208,13 @@ void check_job_waits() {
         const auto now = std::chrono::steady_clock::now();
         lock_waits();
         for (JobWait &w : g_job_waits) {
-            if (!w.counter || w.reported) continue;
+            if (!w.counter) continue;
             int64_t value = 0;
             if (reached(w.counter, w.target, w.mode, value)) { w.counter = nullptr; continue; }
-            if (now - w.since < std::chrono::seconds(3)) continue;
+            // a wait that can never end is settled (stuck_counter.cpp), after the report below
+            consider_stuck_wait(w.counter, w.target, w.mode, value,
+                                std::chrono::duration_cast<std::chrono::milliseconds>(now - w.since).count(), w.chain);
+            if (w.reported || now - w.since < std::chrono::seconds(3)) continue;
             w.reported = true;
             char queues[128], story[768];
             job_queue_counts(queues, sizeof queues);
