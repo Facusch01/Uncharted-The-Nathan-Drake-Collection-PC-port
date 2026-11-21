@@ -1,5 +1,4 @@
 // gow3: SDL3 window for the Vulkan swapchain (X11 or Wayland).
-#include <atomic> // game_in_front, shared with the pad thread
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -64,48 +63,22 @@ const Placement& WindowPlacement() {
     }();
     return placement;
 }
-// gow3 24 Oct 2026: true while this game window counts as the one in front. RefreshInFront sets it
-// from Windows on every PollEvents(); runtime_pad.c only reads the controller while it is true
-// (through gow3gpu_window_foreground below). Off Windows it keeps its initial true.
-std::atomic<bool> game_in_front{true};
-
-// gow3 27 Oct 2026 (reported: in exclusive fullscreen the keyboard worked and the controller did
-// not): Windows may name some other window as the foreground one, such as a window the game owns
-// or an overlay, while the game is still the one getting input. A foreground window whose root
-// owner is the game window counts as the game, and so does SDL's keyboard focus on it. Two
-// diagnostics go to the log: the class of such another window (first time only), and each start
-// of a stretch where the game is in front without SDL's keyboard focus (the state that used to
-// stop the controller).
-void RefreshInFront(SDL_Window* window) {
+// gow3 21 Nov 2026: the whole window black at once, so nothing else shows before the first game
+// frame (Windows; SDL clears only on its first paint, and nothing paints between that and the
+// first frame). Window thread, before the swapchain exists.
+void PaintBlack(SDL_Window* window) {
 #ifdef _WIN32
-    const HWND own = static_cast<HWND>(SDL_GetPointerProperty(
+    const HWND hwnd = static_cast<HWND>(SDL_GetPointerProperty(
         SDL_GetWindowProperties(window), SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr));
-    const HWND top = GetForegroundWindow();
-    const bool windows_agrees =
-        own == nullptr || top == own || GetAncestor(top, GA_ROOTOWNER) == own;
-    const bool sdl_focused = SDL_GetKeyboardFocus() == window;
-    const bool in_front = windows_agrees || sdl_focused;
-    game_in_front = in_front;
-
-    static bool other_window_logged = false;
-    if (in_front && !windows_agrees && !other_window_logged) {
-        other_window_logged = true;
-        char class_name[128] = {};
-        GetClassNameA(top, class_name, sizeof(class_name));
-        std::printf("Input: another window is in front (class '%s') while the game has the keyboard "
-                    "focus; the controller works\n",
-                    class_name);
-        std::fflush(stdout);
+    if (!hwnd) {
+        return;
     }
-
-    static bool focus_gap_logged = false;
-    const bool focus_gap = in_front && !sdl_focused;
-    if (focus_gap && !focus_gap_logged) {
-        std::printf("Input: the window is in front but SDL has no keyboard focus; the controller "
-                    "keeps working\n");
-        std::fflush(stdout);
+    RECT client{};
+    GetClientRect(hwnd, &client);
+    if (HDC dc = GetDC(hwnd)) {
+        FillRect(dc, &client, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+        ReleaseDC(hwnd, dc);
     }
-    focus_gap_logged = focus_gap;
 #else
     (void)window;
 #endif
@@ -135,10 +108,15 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     // gow3 24 Oct 2026 (reported: the controller went dead until some key was pressed): SDL
     // discards gamepad events whenever it believes no window holds the keyboard focus, and it
     // can lose track of that focus with the game window still in front (a key press fixes it).
-    // Background events are therefore always on, and "is the game in front" comes from Windows
-    // (game_in_front). With GOW3_PAD_INDEX (local co-op) each window keeps its own controller
-    // even while the other window is in front.
-    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+    // Background events are therefore always on.
+    // gow3 21 Nov 2026 (owner: keep playing with the controller while the mouse works in another
+    // window): the controller drives the game whichever window is in front. The keyboard and the
+    // mouse still only act while the game window has the focus (SDL sends their events to the
+    // focused window only; Gow3Mouse captures only then). A GOW3_WINDOW_BACKGROUND=1 test window
+    // leaves the player's controller alone unless GOW3_PAD_INDEX gives it one: SDL then drops
+    // controller input while that window has no focus.
+    const bool own_pad = std::getenv("GOW3_PAD_INDEX") && std::atoi(std::getenv("GOW3_PAD_INDEX")) > 0;
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, Background() && !own_pad ? "0" : "1");
     if (!SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
         UNREACHABLE_MSG("Failed to initialize SDL video: {}", SDL_GetError());
     }
@@ -157,19 +135,34 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
             windowed_height = windowed_width * 9 / 16;
         }
     }
+    // gow3: GOW3_FULLSCREEN=1 (older launchers) still asks for fullscreen.
+    if (const char* fullscreen = std::getenv("GOW3_FULLSCREEN"); fullscreen && fullscreen[0] == '1' &&
+        Gow3Settings::Get().display_mode == Gow3Graphics::Windowed) {
+        Gow3Settings::Get().display_mode = Gow3Graphics::Borderless;
+    }
+    // gow3 21 Nov 2026 (reported: borderless and fullscreen started with a white window outline on
+    // black for a few seconds): SDL showed the window at once, windowed with its title bar, and
+    // only then made it fullscreen. The old frame's never-painted pixels stayed inside the now
+    // screen-sized window (SDL clears a window to black only on its first paint) until the first
+    // game frame. The window is now created hidden, in its final shape: for borderless and
+    // fullscreen a borderless window covering the screen, shown once that is so and painted black.
+    SDL_Rect screen{};
+    const bool starts_full = !WindowPlacement().on && Gow3Settings::Get().display_mode != Gow3Graphics::Windowed &&
+                             SDL_GetDisplayBounds(SDL_GetPrimaryDisplay(), &screen) && screen.w > 0 && screen.h > 0;
     SDL_PropertiesID props = SDL_CreateProperties();
     SDL_SetStringProperty(props, SDL_PROP_WINDOW_CREATE_TITLE_STRING, title);
     SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_X_NUMBER,
-                          WindowPlacement().on ? WindowPlacement().x : SDL_WINDOWPOS_CENTERED);
+                          starts_full ? screen.x : WindowPlacement().on ? WindowPlacement().x : SDL_WINDOWPOS_CENTERED);
     SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_Y_NUMBER,
-                          WindowPlacement().on ? WindowPlacement().y : SDL_WINDOWPOS_CENTERED);
-    if (WindowPlacement().borderless) {
+                          starts_full ? screen.y : WindowPlacement().on ? WindowPlacement().y : SDL_WINDOWPOS_CENTERED);
+    if (WindowPlacement().borderless || starts_full) {
         SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_BORDERLESS_BOOLEAN, true);
     }
-    SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, windowed_width);
-    SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, windowed_height);
+    SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, starts_full ? screen.w : windowed_width);
+    SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, starts_full ? screen.h : windowed_height);
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_RESIZABLE_BOOLEAN, true);
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_VULKAN_BOOLEAN, true);
+    SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_HIDDEN_BOOLEAN, true);
     base_title = title;
     window = SDL_CreateWindowWithProperties(props);
     SDL_DestroyProperties(props);
@@ -201,12 +194,9 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     } else {
         UNREACHABLE_MSG("Unsupported SDL video driver {}", driver ? driver : "(none)");
     }
-    // gow3: GOW3_FULLSCREEN=1 (older launchers) still asks for fullscreen.
-    if (const char* fullscreen = std::getenv("GOW3_FULLSCREEN"); fullscreen && fullscreen[0] == '1' &&
-        Gow3Settings::Get().display_mode == Gow3Graphics::Windowed) {
-        Gow3Settings::Get().display_mode = Gow3Graphics::Borderless;
-    }
+    SDL_ShowWindow(window);
     ApplyDisplayMode(Gow3Settings::Get().display_mode);
+    PaintBlack(window); // until the first game frame
     // gow3: the game has no mouse; the in-game menu draws its own cursor (Gow3Overlay::SetOpen).
     SDL_HideCursor();
     int w = 0, h = 0;
@@ -233,6 +223,7 @@ void WindowSDL::ApplyDisplayMode(int mode) {
             SDL_SetWindowSize(window, p.w, p.h);
             SDL_SetWindowPosition(window, p.x, p.y);
         } else if (was_fullscreen) { // back at the windowed size, centered
+            SDL_SetWindowBordered(window, true); // created borderless when started full screen
             SDL_SetWindowSize(window, windowed_width, windowed_height);
             SDL_SetWindowPosition(window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
         }
@@ -284,7 +275,6 @@ void WindowSDL::UpdateTextTitle() {
 }
 
 bool WindowSDL::PollEvents() {
-    RefreshInFront(window); // before anything else in the poll, as the pad gate depends on it
     {
         std::scoped_lock lock{text_mutex};
         if (text_requested) { // SDL text input must be toggled from the window thread
@@ -380,9 +370,3 @@ bool WindowSDL::PollEvents() {
 }
 
 } // namespace Frontend
-
-// C entry for runtime_pad.c (declared in gow3gpu.h): 1 while the game window counts as in front.
-extern "C" int gow3gpu_window_foreground() {
-    const bool in_front = Frontend::game_in_front.load(std::memory_order_relaxed);
-    return in_front ? 1 : 0;
-}
