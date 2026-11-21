@@ -88,6 +88,7 @@ extern "C" int u3fix_install(unsigned char *image, uint64_t size) {
     applied += u3fix::raise_net_process_pool(image, size) ? 1 : 0;
     applied += u3fix::install_package_log(image, size) ? 1 : 0;
     applied += u3fix::install_counter_wait_log(image, size) ? 1 : 0;
+    applied += u3fix::install_stuck_counter(image, size) ? 1 : 0;
     applied += u3fix::install_job_queue_full_log(image, size) ? 1 : 0;
     applied += u3fix::install_audio_mix_direct(image, size) ? 1 : 0;
     applied += u3fix::install_cmdbuf_borrow(image, size) ? 1 : 0;

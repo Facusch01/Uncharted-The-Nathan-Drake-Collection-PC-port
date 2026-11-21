@@ -20,6 +20,13 @@ bool raise_net_process_pool(unsigned char *image, uint64_t size);
 bool install_package_log(unsigned char *image, uint64_t size);
 // a job counter wait that lasts over 5 s is reported with its counter and callers (counter_wait_log.cpp)
 bool install_counter_wait_log(unsigned char *image, uint64_t size);
+// a parked job's wait for 0 that can never end is ended after 4 s (stuck_counter.cpp)
+bool install_stuck_counter(unsigned char *image, uint64_t size);
+// asks for the counter to be settled when the wait can never end; true when asked
+bool consider_stuck_wait(const unsigned char *counter, int64_t target, int mode, int64_t value, int64_t waited_ms,
+                         const char *chain);
+// settles the counters asked for: called on a game thread that holds no job system lock
+void settle_stuck_counters();
 // a job the job system drops because its priority queue is full is reported (job_queue_full_log.cpp)
 bool install_job_queue_full_log(unsigned char *image, uint64_t size);
 // the sound driver runs its mixing job's work itself instead of waiting for a job (audio_mix_direct.cpp)
