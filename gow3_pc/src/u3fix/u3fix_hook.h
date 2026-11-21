@@ -53,6 +53,8 @@ bool exposure_filter_at_least_one(unsigned char *image, uint64_t size);
 bool install_hudnet_text_canvas(unsigned char *image, uint64_t size);
 // in splitscreen the second local player's pad feeds the game's pad port 1 (split_pad.cpp, issue 31)
 bool install_split_pad(unsigned char *image, uint64_t size);
+// diagnostic: each step of a weapon pickup in a net game printed into the log (pickup_log.cpp)
+bool install_pickup_log(unsigned char *image, uint64_t size);
 // a party member takes the host's match settings net game by name, not by the host's index (match_settings_netgame.cpp)
 bool install_match_settings_netgame(unsigned char *image, uint64_t size);
 // one frame of the game's pad update (image 0x10ddd90, given as update): twice, second player first, while the game
