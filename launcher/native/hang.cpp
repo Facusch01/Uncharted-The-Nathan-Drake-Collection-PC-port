@@ -74,6 +74,34 @@ std::string place(uint64_t address, const std::vector<Module> &modules, uint64_t
     return hex(address);
 }
 
+std::string stub_target(HANDLE process, uint64_t address, const std::vector<Module> &modules, uint64_t guest,
+                        uint64_t guest_size) {
+    unsigned char bytes[40] = {};
+    const uint64_t start = address >= 16 ? address - 16 : 0;
+    SIZE_T got = 0;
+    if (!ReadProcessMemory(process, (LPCVOID)start, bytes, sizeof bytes, &got)) return std::string();
+    for (int i = 0; i <= 16; ++i) {
+        if (bytes[i] != 0x48 || bytes[i + 1] != 0xb8 || bytes[i + 12] != 0xff || bytes[i + 13] != 0xe0) continue;
+        uint64_t target = 0;
+        std::memcpy(&target, bytes + i + 2, sizeof target);
+        return " [near stub " + hex(start + i) + " -> " + place(target, modules, guest, guest_size) + "]";
+    }
+    return std::string();
+}
+
+std::string code_bytes(HANDLE process, uint64_t address) {
+    unsigned char bytes[64] = {};
+    SIZE_T got = 0;
+    if (!ReadProcessMemory(process, (LPCVOID)address, bytes, sizeof bytes, &got) || !got) return std::string();
+    std::string out = " bytes";
+    char part[4];
+    for (SIZE_T i = 0; i < got && i < sizeof bytes; ++i) {
+        std::snprintf(part, sizeof part, " %02x", bytes[i]);
+        out += part;
+    }
+    return out;
+}
+
 std::string thread_name(DWORD id) {
     typedef HRESULT(WINAPI * Describe)(HANDLE, PWSTR *);
     static Describe describe = (Describe)(void *)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetThreadDescription");
@@ -161,6 +189,19 @@ Stack walk(HANDLE process, HANDLE thread, const std::vector<Module> &modules, ui
             s.regs.push_back(loop);
         }
     }
+    if (!s.game.empty() || (guest && ctx.Rip < guest) || !guest) {
+        uint64_t words[128] = {};
+        SIZE_T got = 0;
+        if (ReadProcessMemory(process, (LPCVOID)ctx.Rsp, words, sizeof words, &got) && got) {
+            int found = 0;
+            for (size_t i = 0; i < got / sizeof words[0] && found < 8; ++i) {
+                if (guest && words[i] >= guest && words[i] < guest + guest_size) {
+                    s.game.push_back("stack " + hex(words[i] - guest));
+                    ++found;
+                }
+            }
+        }
+    }
     for (int i = 0; i < MAX_FRAMES && rbp; ++i) {
         uint64_t pair[2];
         SIZE_T got = 0;
@@ -169,6 +210,7 @@ Stack walk(HANDLE process, HANDLE thread, const std::vector<Module> &modules, ui
         if (pair[0] <= rbp) break;
         rbp = pair[0];
     }
+    s.native.push_back("current " + place(ctx.Rip, modules, guest, guest_size));
     // host frames via dbghelp's unwinder
     STACKFRAME64 frame{};
     frame.AddrPC.Offset = ctx.Rip;
@@ -181,7 +223,12 @@ Stack walk(HANDLE process, HANDLE thread, const std::vector<Module> &modules, ui
         if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, process, thread, &frame, &ctx, nullptr, SymFunctionTableAccess64,
                          SymGetModuleBase64, nullptr) || !frame.AddrPC.Offset)
             break;
-        s.native.push_back(place(frame.AddrPC.Offset, modules, guest, guest_size));
+        std::string label = place(frame.AddrPC.Offset, modules, guest, guest_size);
+        if (!label.empty() && label[0] == '0') {
+            label += stub_target(process, frame.AddrPC.Offset, modules, guest, guest_size);
+            label += code_bytes(process, frame.AddrPC.Offset);
+        }
+        s.native.push_back(label);
     }
     return s;
 }
