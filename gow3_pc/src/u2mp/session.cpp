@@ -149,6 +149,7 @@ struct Member {
     std::string villain;
     uint8_t rank = 0;
     uint8_t team = 0;
+    uint32_t import_notice = 0;
 };
 
 Member members[kSlots];
@@ -570,13 +571,18 @@ void on_info(uint8_t from, const uint8_t *d, size_t size) {
         uint32_t theirs = get<uint32_t>(d + 4 + len);
         uint32_t mine = unlocks_skin_fingerprint();
         if (theirs != 0 && mine != 0 && theirs != mine) {
-            log("party: %s's skin table differs (fingerprint %08x, ours %08x): a different import; skins may show "
-                "as others",
-                m.name.c_str(), theirs, mine);
-            std::string notice = m.name +
-                                 " has a different Uncharted 2 multiplayer import. Their character skins may show "
-                                 "differently. Both players should run the importer again.";
-            show_notice(notice.c_str());
+            if (m.import_notice != theirs) {
+                m.import_notice = theirs;
+                log("party: %s's skin table differs (fingerprint %08x, ours %08x): a different import; skins may show "
+                    "as others",
+                    m.name.c_str(), theirs, mine);
+                std::string notice = m.name +
+                                     " has a different Uncharted 2 multiplayer import. Their character skins may show "
+                                     "differently. Both players should run the importer again.";
+                show_notice(notice.c_str());
+            }
+        } else {
+            m.import_notice = 0;
         }
     }
     size_t at = 8 + len;
