@@ -688,6 +688,7 @@ static void sample_host(PadData *d, SDL_Gamepad *g, int keys, int player2) {
     /* The keyboard works with or without a gamepad: its buttons add to the pad's, and a stick
      * follows the keys only while one of them is held. GOW3_KEYBOARD=0 turns it off (typing in
      * another window that lost the focus to the game would otherwise press buttons). */
+    const uint32_t pad_buttons=d->buttons;
     if (k && keys && keyboard_enabled()) {
         for (size_t i=0;i<key_map.count;++i) if (k[key_map.entries[i].source]) { d->buttons|=key_map.entries[i].ps; keyboard_used=1; }
         bool held[STICK_KEYS]={0};
@@ -698,6 +699,7 @@ static void sample_host(PadData *d, SDL_Gamepad *g, int keys, int player2) {
         key_axis(&d->right_y,held[RS_UP],held[RS_DOWN]);
     }
     if (keys && sample_mouse(d,player2)) keyboard_used=1;
+    if (keys && !runtime_split_keys_settled(player2,(d->buttons & ~pad_buttons)!=0)) d->buttons=pad_buttons; /* changed hands */
     if (d->buttons & BTN_L2) d->l2=255;
     if (d->buttons & BTN_R2) d->r2=255;
     if (player2) return;

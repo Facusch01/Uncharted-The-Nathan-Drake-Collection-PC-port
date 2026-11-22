@@ -12,7 +12,9 @@
 // second player's state at 0x17f2fc0 equal to 3: the game's own rule, see its local player count at 0x7a2c24), the
 // update now runs twice per frame. First with the second player's own work block (handle 2: the runtime's second
 // player pad, src/runtime_split.h); what that gives port 0's block is copied to port 1's. Then with player 1's work
-// block as usual, so player 1's presses and releases are worked out against player 1's previous report only. The
+// block as usual, so player 1's presses and releases are worked out against player 1's previous report only; port 0's
+// block is put back to player 1's between the two (22 Nov 2026: a player 1 read without a new report left player 2's
+// state on port 0). The
 // sample queue the update shifts at the end (count at 0x1d60728, unused by the PS4 game, its shift overwrites port 1's
 // block) is kept off in these frames. Without a second player the update runs once, exactly as before. Found by its
 // bytes.
@@ -69,8 +71,9 @@ uint32_t split_pad_frame(unsigned char *image, unsigned char *ports, SplitPadUpd
         std::fflush(stdout);
     }
     const int32_t off = -1;
-    unsigned char first[kBlock];
+    unsigned char first[kBlock], port0[kBlock];
     std::memcpy(first, image + kWork, kBlock);
+    std::memcpy(port0, image + kPort0, kBlock);
     std::memcpy(image + kWork, g_second, kBlock);
     std::memcpy(image + kQueueCount, &off, 4);
     update(ports);
@@ -79,6 +82,9 @@ uint32_t split_pad_frame(unsigned char *image, unsigned char *ports, SplitPadUpd
     // device) port 0's block still holds player 1's last state, so port 1 gets an empty (disconnected) block
     if (g_second[kReadAt]) std::memcpy(image + kPort1, image + kPort0, kBlock);
     else std::memset(image + kPort1, 0, kBlock);
+    // port 0's block goes back to player 1's: player 1's update copies its work block there only when its read
+    // brings a new report, so without this player 2's state would stay on port 0 (player 1) for that frame
+    std::memcpy(image + kPort0, port0, kBlock);
     std::memcpy(image + kWork, first, kBlock);
     std::memcpy(image + kQueueCount, &off, 4);
     return update(ports);

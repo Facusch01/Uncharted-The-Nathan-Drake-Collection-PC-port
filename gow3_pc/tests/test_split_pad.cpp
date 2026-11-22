@@ -17,6 +17,7 @@ constexpr uint64_t kNetGame = 0x17d5c61, kSplitSwitch = 0x17d7b06, kSecondState 
 std::vector<unsigned char> g_image(0x1d70000);
 unsigned char *image() { return g_image.data(); }
 bool g_second_device = true;
+bool g_first_new = true;   // player 1's read brings a new report (scePadRead > 0)
 int g_calls = 0;
 
 int32_t get32(uint64_t at) { int32_t v; std::memcpy(&v, image() + at, 4); return v; }
@@ -32,7 +33,7 @@ __attribute__((sysv_abi)) uint32_t fake_update(unsigned char *ports) {
     const int32_t handle = get32(kWork + 0x78);
     const bool ok = handle == 1 || (handle == RUNTIME_PAD2_HANDLE && g_second_device);
     work[0x74] = ok;
-    if (ok) {
+    if (ok && (handle != 1 || g_first_new)) {
         std::memcpy(work + 0x68, work, 4);
         const int32_t buttons = handle * 0x100 + g_calls;
         std::memcpy(work, &buttons, 4);
@@ -61,6 +62,22 @@ void devices() {
     assert(!runtime_split_p2_active());
     runtime_split_p2_read();
     assert(runtime_split_p2_active());
+}
+
+void keys_change_hands() {
+    // player 1 alone: held keys always count
+    assert(runtime_split_keys_settled(0, 1) && runtime_split_keys_settled(0, 0) && runtime_split_keys_settled(0, 1));
+    // player 2 takes them while Enter is held (it joined player 2): nothing for player 2 until released
+    assert(!runtime_split_keys_settled(1, 1));
+    assert(!runtime_split_keys_settled(1, 1));
+    assert(runtime_split_keys_settled(1, 0));
+    assert(runtime_split_keys_settled(1, 1));   // a new press is player 2's
+    // back to player 1 with a key held (player 2 left): the same
+    assert(!runtime_split_keys_settled(0, 1));
+    assert(runtime_split_keys_settled(0, 0) && runtime_split_keys_settled(0, 1));
+    // changing hands with nothing held loses nothing
+    assert(runtime_split_keys_settled(1, 0) && runtime_split_keys_settled(1, 1));
+    assert(runtime_split_keys_settled(0, 0));
 }
 
 void port_one() {
@@ -95,12 +112,22 @@ void port_one() {
     image()[kNetGame] = 0;
     u3fix::split_pad_frame(image(), nullptr, fake_update);
     assert(g_calls == 13 && get32(kPort1) == 0 && get32(kPort0) == 0x10d);
+    // player 1's read brings no new report (the update keeps port 0's block then): port 0 stays player 1's, never
+    // the state player 2's update left there
+    image()[kNetGame] = 1;
+    u3fix::split_pad_frame(image(), nullptr, fake_update);
+    assert(get32(kPort1) == 0x20e && get32(kPort0) == 0x10f);
+    g_first_new = false;
+    u3fix::split_pad_frame(image(), nullptr, fake_update);
+    assert(get32(kPort1) == 0x210 && get32(kPort0) == 0x10f && get32(kPort0 + 0x78) == 1);
+    g_first_new = true;
 }
 
 }  // namespace
 
 int main() {
     devices();
+    keys_change_hands();
     port_one();
     std::puts("Second player pad tests passed");
     return 0;

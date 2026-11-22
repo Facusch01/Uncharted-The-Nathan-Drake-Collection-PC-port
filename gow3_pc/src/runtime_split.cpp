@@ -61,3 +61,18 @@ extern "C" void runtime_split_p2_read(void) {
 extern "C" int runtime_split_p2_active(void) {
     return g_last_read_ms && SDL_GetTicks() + 1 - g_last_read_ms < kActiveMs;
 }
+
+namespace {
+int g_keys_owner = 0;          // player 1 has them until player 2 takes them
+bool g_keys_settling = false;
+}  // namespace
+
+extern "C" int runtime_split_keys_settled(int player2, int held) {
+    const int owner = player2 ? 1 : 0;
+    if (owner != g_keys_owner) {
+        g_keys_owner = owner;
+        g_keys_settling = held != 0;
+    }
+    if (g_keys_settling && !held) g_keys_settling = false;
+    return !g_keys_settling;
+}

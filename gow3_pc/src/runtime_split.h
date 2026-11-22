@@ -7,6 +7,9 @@
  *   - else, with player 1 on a controller, the keyboard and mouse are player 2's pad;
  *   - while player 2's pad is being read (splitscreen on), the keyboard and mouse no longer drive player 1 when they
  *     are player 2's. Without splitscreen nothing changes: every game reads only handle 1.
+ *   - when they change hands, keys and mouse buttons still held from before press nothing for the new owner until
+ *     released (22 Nov 2026: Enter held on the Splitscreen row joined player 2, then pressed it again as player 2's,
+ *     and as player 1's once more after player 2 left: the row flipped in and out).
  * GOW3_PAD_INDEX (one game window per controller) gives no second player. */
 #ifndef RUNTIME_SPLIT_H
 #define RUNTIME_SPLIT_H
@@ -30,6 +33,10 @@ SDL_Gamepad *runtime_split_gamepad2(SDL_Gamepad *first, int pad_index);
 /* Player 2's pad was read now / was read in the last half second (splitscreen is on). */
 void runtime_split_p2_read(void);
 int runtime_split_p2_active(void);
+/* The keyboard and mouse change hands (player 1 <-> player 2) while a key or mouse button is held: that hold is not a
+ * new press for the new owner. Called by the owner's sample (player2: whose) with held = keys or mouse buttons pressing
+ * something now; 0 = drop their buttons from this sample, until they are all released once. */
+int runtime_split_keys_settled(int player2, int held);
 
 #ifdef __cplusplus
 }
