@@ -6,6 +6,23 @@ registration point is `recipe/steps/ORDER.txt` (one step id per line, run top to
 `u3fix.exe` (the list of sources is in `tools/package_windows.sh`, the command names in
 `tools/fixes/dctools/u3fix.cpp`). The driver is `u3import.exe` (`u3mp/patcher/importer`). No step runs Python.
 
+## 0. A map, character or texture fix is a converter rule, not a step
+
+A fix to a converted level, actor or texture pak goes into the converter that writes that pak, so the import writes
+each pak once, already fixed. No new step that patches converted paks afterwards, and no second pass over the bytes
+the converter just wrote. Where the rules live:
+
+* levels (`convert-levels-*`, `tools/fixes/pak23-levels/plan.tsv`): `dctools/ps4stage.cpp` (geometry, instance
+  flags, materials and bindings, light table), `dctools/stageplan.cpp` (template and texture choices); a level's PS3
+  source is the row's `archive` / `src`;
+* actors and net.pak (`convert-actors-r3`, `tools/fixes/actor33/jobs.tsv`): `dctools/ps4actor.cpp` (method
+  `ps4actor`; `am` = a retail material template, modes `retail-mats`, `tint`, `tint-all`), `dctools/ps4mats.cpp`
+  (`convert_net`, `wpnmods`).
+
+Prefer a general rule (it fixes every pak with the same cause); a fix that is really one asset's is a rule keyed by
+that level / material name, with a comment giving the reason. Then rehash the rows whose output changed (plan.tsv /
+jobs.tsv `sha256`) and bump the recipe version.
+
 ## 1. Put the fix in a job folder
 
 `tools/fixes/<job>/` holds the source of one fix job and its small data (plans, name lists). Rules:

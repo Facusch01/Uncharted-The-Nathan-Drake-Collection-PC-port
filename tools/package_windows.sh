@@ -119,7 +119,7 @@ u2_import() {   # Uncharted 2's importer and its list of what it makes (it reads
         "$fx/sound-banks/convert_banks.cpp" "$fx/dctools/ndpak.cpp" "$fx/dctools/ps4writer.cpp" "$fx/dctools/ps4ingame.cpp" \
         "$fx/dctools/ps4stage.cpp" "$fx/dctools/stageplan.cpp" "$fx/dctools/ps3bg.cpp" "$fx/dctools/visinfo.cpp" "$fx/dctools/collision.cpp" \
         "$fx/dctools/texcodec.cpp" "$fx/dctools/hkconvert.cpp" "$fx/dctools/ps3fp.cpp" "$fx/dctools/ps4mats.cpp" "$fx/dctools/ps4actor.cpp" \
-        "$fx/dctools/anim.cpp" "$fx/dctools/skel.cpp" "$fx/dctools/fgcoll.cpp" "$fx/dctools/dcconv.cpp"; do
+        "$fx/dctools/anim.cpp" "$fx/dctools/skel.cpp" "$fx/dctools/fgcoll.cpp" "$fx/dctools/dcconv.cpp" "$fx/dctools/normal_blend.cpp"; do
         o=$dir/${s//\//_}.o
         "${CXX[@]}" "${flags[@]}" -c "$s" -o "$o"
         objs+=("$o")
@@ -161,7 +161,7 @@ u3_import() {   # Uncharted 3's importer, its recipe and tools, and the newest m
     for s in "$fx/dctools/u3fix.cpp" "$fx/dctools/fixlib.cpp" "$fx/dctools/dc.cpp" "$fx/dctools/eula_box.cpp" "$fx/no-lab/remove_lab.cpp" \
         "$fx/no-rpcn-menu/remove_rpcn_page.cpp" "$fx/netgame-order/netgame_order.cpp" \
         "$fx/enemy-stall/apply_ss_option_defaults.cpp" \
-        "$fx/coop-chars/apply_coop_desc_fix.cpp" "$fx/coop-tab/fix_vram_gap.cpp" "$fx/airport-igc3/airport_igc3.cpp" \
+        "$fx/coop-chars/apply_coop_desc_fix.cpp" "$fx/airport-igc3/airport_igc3.cpp" \
         "$fx/dctools/psarc.cpp" "$fx/text1-merge/merge_text1.cpp" "$fx/coop-audit/apply_option_defaults_2.cpp" \
         "$fx/registry/run_mkregistry.cpp" "$fx/pak23-registry/apply_registry.cpp" "$fx/hat-chloe/apply_hair_key.cpp" \
         "$fx/pak23-levels/levels.cpp" "$fx/actor33/build_actors.cpp" "$fx/dctools/proc.cpp" "$fx/dctools/ndpak.cpp" \
@@ -172,7 +172,7 @@ u3_import() {   # Uncharted 3's importer, its recipe and tools, and the newest m
         "$fx/dctools/dcconv.cpp" "$fx/dcconv/convert_dc1.cpp" "$fx/dcconv/apply_recipes.cpp" "$fx/sound-banks/convert_banks.cpp" \
         "$fx/part-emitters/build_part_modules.cpp" "$fx/audio-defs/audio_defs.cpp" "$fx/music-streams/copy_music.cpp" "$fx/actor33/actors_hk.cpp" "$fx/coop-vo/apply_vo.cpp" \
         "$fx/coop-voice2/apply_coop_vox.cpp" "$fx/dctools/net_edits.cpp" \
-        "$fx/coop-audit/apply_shade_npc_paks.cpp" "$fx/inline/facility_collapse.cpp" "$fx/eula-batch/make_eula.cpp" "$fx/wall-emblem/make_emblem.cpp" "$fx/dctools/lab_reg.cpp" "$fx/borneo/borneo_fixes.cpp" "$fx/world-levels/world_levels.cpp" "$fx/london/apply_london.cpp" "$fx/map-lighting/apply_map_lighting.cpp" "$fx/map-colors/apply_mapcolor.cpp" "$fx/map-colors2/apply_mapcolor2.cpp" "$fx/hud-mod-mips/limit_mod_mips.cpp"; do
+        "$fx/eula-batch/make_eula.cpp" "$fx/wall-emblem/make_emblem.cpp" "$fx/dctools/lab_reg.cpp" "$fx/world-levels/world_levels.cpp" "$fx/dctools/normal_blend.cpp"; do
         o=$dir/${s//\//_}.o
         "${CXX[@]}" "${flags[@]}" -MMD -MF "$o.d" -c "$s" -o "$o"
         objs+=("$o")

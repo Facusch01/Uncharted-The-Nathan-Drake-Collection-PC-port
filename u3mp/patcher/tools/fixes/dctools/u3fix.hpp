@@ -38,14 +38,12 @@ std::string py_rstrip(const std::string &s);
 std::vector<std::string> py_splitlines(const std::string &s);
 
 int remove_lab(const std::vector<std::string> &argv);         // tools/fixes/no-lab/remove_lab.cpp
-int hud_mod_mips(const std::vector<std::string> &argv);       // tools/fixes/hud-mod-mips/limit_mod_mips.cpp
 int remove_rpcn_page(const std::vector<std::string> &argv);   // tools/fixes/no-rpcn-menu/remove_rpcn_page.cpp
 int world_levels(const std::vector<std::string> &argv);       // tools/fixes/world-levels/world_levels.cpp
 int netgame_order(const std::vector<std::string> &argv);      // tools/fixes/netgame-order/netgame_order.cpp
 int eula_box(const std::vector<std::string> &argv);           // tools/fixes/dctools/eula_box.cpp
 int enemy_stall(const std::vector<std::string> &argv);        // tools/fixes/enemy-stall/apply_ss_option_defaults.cpp
 int coop_desc(const std::vector<std::string> &argv);          // tools/fixes/coop-chars/apply_coop_desc_fix.cpp
-int vram_gap(const std::vector<std::string> &argv);           // tools/fixes/coop-tab/fix_vram_gap.cpp
 int igc3_retargets(const std::vector<std::string> &argv);     // tools/fixes/airport-igc3/airport_igc3.cpp
 int igc3_install(const std::vector<std::string> &argv);       // tools/fixes/airport-igc3/airport_igc3.cpp
 int text1_merge(const std::vector<std::string> &argv);        // tools/fixes/text1-merge/merge_text1.cpp
@@ -55,8 +53,6 @@ int registry_final(const std::vector<std::string> &argv);     // tools/fixes/pak
 int hair_key(const std::vector<std::string> &argv);           // tools/fixes/hat-chloe/apply_hair_key.cpp
 int levels(const std::vector<std::string> &argv);             // tools/fixes/pak23-levels/levels.cpp
 int actors(const std::vector<std::string> &argv);             // tools/fixes/actor33/build_actors.cpp
-int rebuild_am(const std::vector<std::string> &argv);          // tools/fixes/actor33/build_actors.cpp
-int install_am(const std::vector<std::string> &argv);          // tools/fixes/actor33/build_actors.cpp
 int convert_dc1(const std::vector<std::string> &argv);         // tools/fixes/dcconv/convert_dc1.cpp
 int dc_recipes(const std::vector<std::string> &argv);          // tools/fixes/dcconv/apply_recipes.cpp
 int sound_banks(const std::vector<std::string> &argv);         // tools/fixes/sound-banks/convert_banks.cpp
@@ -70,21 +66,12 @@ int elim_pic(const std::vector<std::string> &argv);            // tools/fixes/dc
 int classic(const std::vector<std::string> &argv);             // tools/fixes/dctools/net_edits.cpp
 int skins_net_names(const std::vector<std::string> &argv);     // tools/fixes/dctools/net_edits.cpp
 int booster_table(const std::vector<std::string> &argv);       // tools/fixes/dctools/net_edits.cpp
-int shade_npc(const std::vector<std::string> &argv);           // tools/fixes/coop-audit/apply_shade_npc_paks.cpp
-int facility_collapse(const std::vector<std::string> &argv);   // tools/fixes/inline/facility_collapse.cpp
 std::string find_ffmpeg(const std::string &arg);         // --ffmpeg, RECIPE_FFMPEG, msys2, PATH (sound-banks/convert_banks.cpp)
 Bytes sound_bank_convert(const Bytes &ps3, const std::string &ffmpeg, const fs::path &adsr_env, std::string &note);   // one bank (the U2 import)
 int eula_pages(const std::vector<std::string> &argv);          // tools/fixes/eula-batch/make_eula.cpp
 int lab_registration(const std::vector<std::string> &argv);      // tools/fixes/dctools/lab_reg.cpp
 bool net_is_ps3_order(const Dc &net, const std::string &net18);   // dctools/net_edits.cpp: netgame table in PS3 1.19 order
 int maps_batch_dc(const std::vector<std::string> &argv);         // tools/fixes/dctools/lab_reg.cpp
-int water_jitter(const std::vector<std::string> &argv);          // tools/fixes/borneo/borneo_fixes.cpp
-int grass_leaf(const std::vector<std::string> &argv);            // tools/fixes/borneo/borneo_fixes.cpp
-int london_fade(const std::vector<std::string> &argv);           // tools/fixes/london/apply_london.cpp
-int map_lighting(const std::vector<std::string> &argv);          // tools/fixes/map-lighting/apply_map_lighting.cpp
-int map_colors(const std::vector<std::string> &argv);            // tools/fixes/map-colors/apply_mapcolor.cpp
-// the level converter pass map-colors2 (tools/fixes/map-colors2/apply_mapcolor2.cpp): the fixed pak, or none
-std::optional<Bytes> map_colors2_pass(const Bytes &ps4, const std::string &pak, const Bytes &ps3, std::vector<std::vector<std::string>> *log);
 int pakinfo(const std::vector<std::string> &argv);            // dctools/ndpak.cpp: a pak's summary (as ndpak.py prints it)
 
 }  // namespace u3

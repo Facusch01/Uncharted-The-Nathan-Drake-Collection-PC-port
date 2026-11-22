@@ -2,6 +2,7 @@
 #include "ps4stage.hpp"
 
 #include "collision.hpp"
+#include "normal_blend.hpp"
 #include "proc.hpp"
 #include "ps3fp.hpp"
 #include "ps4writer.hpp"
@@ -532,6 +533,7 @@ struct Submesh {
     std::vector<uint16_t> counts, joints;
     std::vector<float> wts;
     Mat pos;
+    std::vector<uint32_t> tri;   // the index list as written
 };
 struct ProtoW {
     std::string name;
@@ -645,8 +647,85 @@ Bytes bc1_invert(const Bytes &blob) {
     return out;
 }
 
+// ---- look rules of single levels and submeshes (formerly the fix-up steps facility-collapse and map-colors) -----------
+//
+// Facility (facility-multi): its Prototype360 is a coarse low-poly shell of the building, meant to be seen from far away;
+// drawn up close it put a wall across the walk-through doorway. Every triangle of that prototype that spans more than 6 m
+// is written degenerate (its first corner three times, like the emblem walls), and so is the remaining box of
+// Submesh1 (x -32.2..-28.4, y 0.2..4.9, z -14.2..-10.25). Positions are the prototype-local float32 ones the pak holds.
+void collapse_far_shell(const std::string &stage, size_t proto, uint32_t chunk, const Mat &pos, Bytes &idx) {
+    if (stage != "facility-multi" || proto != 360) return;
+    const bool sub1 = chunk == 1;
+    auto at = [&](size_t k) { return uint32_t(idx[2 * k] | idx[2 * k + 1] << 8); };
+    for (size_t k = 0; k + 2 < idx.size() / 2; k += 3) {
+        const uint32_t x[3] = {at(k), at(k + 1), at(k + 2)};
+        if (x[0] == x[1] && x[1] == x[2]) continue;
+        double v[3][3];
+        for (int t = 0; t < 3; t++)
+            for (int c = 0; c < 3; c++) v[t][c] = double(float(pos.at(x[t], size_t(c))));
+        double ext = -1e300;
+        for (int c = 0; c < 3; c++) ext = std::max(ext, std::max({v[0][c], v[1][c], v[2][c]}) - std::min({v[0][c], v[1][c], v[2][c]}));
+        bool inbox = sub1;
+        for (int t = 0; t < 3; t++)
+            inbox = inbox && -32.2 <= v[t][0] && v[t][0] <= -28.4 && -14.2 <= v[t][2] && v[t][2] <= -10.25 && 0.2 <= v[t][1] && v[t][1] <= 4.9;
+        if (ext > 6 || inbox)
+            for (size_t q = 1; q < 3; q++) idx[2 * (k + q)] = uint8_t(x[0]), idx[2 * (k + q) + 1] = uint8_t(x[0] >> 8);
+    }
+}
+
+// An instance submesh merges up to MAX_BLOCKS PS3 blocks and gets the "own lightmap UVs" flag (0x100) when any of them
+// has lightmap UVs. A triangle whose three corners all have zero lightmap UVs (the half-float components' maximum is 0)
+// then samples lightmap texel (0, 0) instead of its vertex light: Airstrip's black floor. Such a submesh keeps vertex
+// light (the few lightmapped triangles in it lose their lightmap detail). 'tri' is the prototype submesh's index list,
+// 'lm' the instance's lightmap-uv stream (slot 5, half2); one shorter than the prototype's vertices is left alone.
+bool zero_lightmap_triangle(const std::vector<uint32_t> &tri, size_t nv, const Bytes &lm) {
+    const size_t rows = lm.size() / 4;
+    if (rows < nv) return false;
+    auto zero = [&](uint32_t v) {
+        bool nan = false;
+        double mx = -INFINITY;
+        for (size_t c = 0; c < 2; c++) {
+            const uint32_t h = uint32_t(lm.at(4 * size_t(v) + 2 * c) | lm.at(4 * size_t(v) + 2 * c + 1) << 8);
+            const int e = int(h >> 10 & 31), m = int(h & 1023);
+            double x = e == 0 ? std::ldexp(m, -24) : e == 31 ? (m ? NAN : INFINITY) : std::ldexp(m + 1024, e - 25);
+            if (h & 0x8000) x = -x;
+            nan = nan || std::isnan(x);
+            mx = std::max(mx, x);
+        }
+        return !nan && mx == 0;
+    };
+    for (size_t k = 0; k + 2 < tri.size(); k += 3)
+        if (zero(tri[k]) && zero(tri[k + 1]) && zero(tri[k + 2])) return true;
+    return false;
+}
+// Fort (fort-multi, fort-multi-stage): PS3's fragment program for ground/stone-steps draws the stone layer where the
+// converted material draws the grass one, so the two colour and the two normal bindings trade places (each colour keeps
+// its normal map). Applies to the level's only material of that name while Colour2 is not yet the stone colour.
+struct BindW {   // one material binding as written: string pool offsets of its parameter, short and full texture path
+    std::string param;
+    int64_t name, shrt, full;
+    std::string fullp;
+};
+void swap_stone_step_layers(const std::string &stage, const std::string &mat, bool unique, std::vector<BindW> &bw) {
+    if ((stage != "fort-multi" && stage != "fort-multi-stage") || !unique || !ends_with(mat.substr(0, mat.find(',')), "ground/stone-steps:default")) return;
+    auto find = [&](const char *p) -> BindW * {
+        for (BindW &b : bw)
+            if (b.param == p) return &b;
+        return nullptr;
+    };
+    BindW *c1 = find("g_tNdFetchColor1Map"), *c2 = find("g_tNdFetchColor2Map"), *n1 = find("g_tNdFetchNormal1Map"), *n2 = find("g_tNdFetchNormal2Map");
+    if (!c1 || !c2 || !n1 || !n2 || has(c2->fullp, "stone-step-color")) return;
+    for (auto [x, y] : {std::make_pair(c1, c2), std::make_pair(n1, n2)}) {
+        std::swap(x->shrt, y->shrt);
+        std::swap(x->full, y->full);
+        std::swap(x->fullp, y->fullp);
+    }
+}
+// ---- end of the level and submesh look rules ------------------------------------------------------------------------
+
 std::shared_ptr<Blob> convert_light_table(const Pak &p, AutoPages &P, const std::function<std::optional<std::vector<std::string>>(const std::vector<uint32_t> &)> &gobo,
-                                          std::shared_ptr<PakWItem> &item, bool tunnel_probes = false, size_t *approx = nullptr);
+                                          std::shared_ptr<PakWItem> &item, bool tunnel_probes = false, size_t *approx = nullptr,
+                                          const std::string &stage = "");
 std::shared_ptr<Blob> water_blob(const Pak &p, const std::function<std::string(const std::string &)> &matkey);
 
 Bytes convert_once(const Pak &p, const std::string &stage, const Plan &plan, const Bundle &bundle, const Options &opt, Uni &U, bool build) {
@@ -1927,6 +2006,8 @@ Bytes convert_once(const Pak &p, const std::string &stage, const Plan &plan, con
                     rec.sk_w = raw(wb);
                     rec.has_infl = true;
                 }
+                if (posarr) collapse_far_shell(stage, pi, c0, *posarr, idx);
+                for (size_t k = 0; k + 1 < idx.size(); k += 2) rec.tri.push_back(uint32_t(idx[k] | idx[k + 1] << 8));
                 rec.name = stage + ".Prototype" + std::to_string(pi) + ".Submesh" + std::to_string(c0);
                 rec.nv = nv;
                 rec.ni = ni;
@@ -2033,16 +2114,23 @@ Bytes convert_once(const Pak &p, const std::string &stage, const Plan &plan, con
                 bool lmf = false;
                 for (uint32_t b : rr.chunk)
                     if (ii < blocks[b].inst.size() && blocks[b].inst_lm[ii]) lmf = true;
-                // retail shadow-only flags on shadow-blocker submeshes (0x10000; 0x1010000 for ik-only), unless the PS3
-                // instance word +8 has 0x10000; hidden blockers also carry +0x24 = 0x101
+                // retail shadow-only flags on shadow-blocker submeshes (0x10000; 0x1010000 for ik-only); hidden blockers
+                // also carry +0x24 = 0x101. A blocker drawn in the colour pass is invisible and never reaches the sun's
+                // shadow pass, so the sun floods interiors (London Underground's library): every blocker is shadow-only,
+                // also one whose PS3 instance word +8 has 0x10000 (a lower-case match of the material name; an upper-case
+                // spelling still needs the PS3 word clear)
                 uint32_t sbf = 0;
                 const std::string &pm = rr.ps3mat;
                 std::string pml = pm;
                 for (char &ch : pml) ch = char(std::tolower((unsigned char)ch));
                 if (has(pm, "ik-only")) sbf = 0x1010000;
-                else if ((has(pml, "shadowblocker") || has(pml, "canopy-shadow")) && !(I.x8 & 0x10000)) sbf = 0x10000;
+                else if ((has(pml, "shadowblocker") || has(pml, "canopy-shadow")) &&
+                         (!(I.x8 & 0x10000) || has(pm, "shadowblocker") || has(pm, "canopy-shadow")))
+                    sbf = 0x10000;
                 is.st = ist.empty() ? nullptr : streams_blob(ist);
                 is.n = ist.size();
+                const auto lm = std::find_if(ist.begin(), ist.end(), [](const StreamIn &s) { return s.slot == 5; });
+                if (lmf && lm != ist.end() && zero_lightmap_triangle(rr.tri, rr.nv, lm->data)) lmf = false;   // see zero_lightmap_triangle
                 is.flags = ((lmf && !lm_entries.empty()) ? 0x100 : 0) | sbf;
                 is.flags2 = sbf ? 0x101 : 0;
                 ins.subs.push_back(is);
@@ -2110,6 +2198,26 @@ Bytes convert_once(const Pak &p, const std::string &stage, const Plan &plan, con
     }
 
     // ---------------- material / texture tables
+    // U3: a PS3 layer blend from a normal map's blue channel on a flat BlendMap gets that channel as its blend map
+    // (normal_blend.hpp); decided on the materials as they are written (the first of each name)
+    if (!g_u2) {
+        std::vector<MatW *> mats;
+        for (const std::string &n : names3)
+            if (std::none_of(mats.begin(), mats.end(), [&](const MatW *x) { return x->name == matrec[n].name; })) mats.push_back(&matrec[n]);
+        std::vector<nblend::Material> view;
+        for (const MatW *m : mats) {
+            nblend::Material v{m->name, m->rec.shader, m->rec.feats, {}};
+            for (const auto &b : m->binds) v.binds.push_back({b.param, b.e ? (has(b.param, "LightMap") ? b.shrt : short_of(b.e->path)) : b.shrt});
+            view.push_back(std::move(v));
+        }
+        for (const nblend::Blend &z : nblend::normal_blue_blends(p, view)) {
+            const std::string path_ = cook_prefix() + z.shrt + "/" + u3::fmt("%016llX", (unsigned long long)sidu(z.shrt)) + ".ndb";
+            const uint32_t hsh_ = sidu(after_prefix(path_));
+            const TexP e = add_texture_desc(path_, desc_bytes(hsh_, 1, 0x47, 0x01000000, z.mips, z.w, z.h, 3), z.texels, gtex_bytes(hsh_, 0x400, 4));
+            for (auto &b : mats[z.mat]->binds)
+                if (b.param == "g_tNdFetchBlendMap") b.e = e;
+        }
+    }
     std::vector<TexP> gtex;
     for (const std::string &n : names3)
         for (const auto &b : matrec[n].binds)
@@ -2144,15 +2252,23 @@ Bytes convert_once(const Pak &p, const std::string &stage, const Plan &plan, con
             parb->ptr(strs, S(mp.name)).ptr(valb, int64_t(voff)).u32(mp.cnt).u32(mp.x);
         }
         const size_t boff = bindb->size();
+        std::vector<BindW> bw;
         for (const auto &b : m->binds) {
             std::string full2 = b.full, sh = b.shrt;
             if (b.e) {
                 full2 = b.e->full;
                 sh = has(b.param, "LightMap") ? b.shrt : short_of(b.e->path);
             }
-            bindb->ptr(strs, S(b.param));
-            bindb->ptr(strs, S(sh));
-            bindb->ptr(strs, S(full2)).i32(-1).u32(0).u64(0);
+            const int64_t n_ = S(b.param), s_ = S(sh), f_ = S(full2);
+            bw.push_back({b.param, n_, s_, f_, full2});
+        }
+        swap_stone_step_layers(stage, m->name, std::count_if(mat_order.begin(), mat_order.end(), [](const MatW *x) {
+                                   return ends_with(x->name.substr(0, x->name.find(',')), "ground/stone-steps:default");
+                               }) == 1, bw);
+        for (const BindW &b : bw) {
+            bindb->ptr(strs, b.name);
+            bindb->ptr(strs, b.shrt);
+            bindb->ptr(strs, b.full).i32(-1).u32(0).u64(0);
         }
         matb->ptr(strs, S(m->name));
         matb->ptr(strs, S(rec.shader));
@@ -2296,7 +2412,7 @@ Bytes convert_once(const Pak &p, const std::string &stage, const Plan &plan, con
     if (opt.light_table) {
         if (auto lb = opt.light_table(p)) light = P.item("LIGHT_TABLE_1", lb);
     } else
-        convert_light_table(p, P, gobo, light, (opt.sky || opt.fixes) && stage == "ldn-train-multi-tunnel", build ? opt.approx : nullptr);
+        convert_light_table(p, P, gobo, light, (opt.sky || opt.fixes) && stage == "ldn-train-multi-tunnel", build ? opt.approx : nullptr, stage);
     // texture table
     std::vector<TexP> order = tex_order;
     std::stable_sort(order.begin(), order.end(), [](const TexP &a, const TexP &b) { return a->hash < b->hash; });
@@ -2388,7 +2504,7 @@ Bytes convert_once(const Pak &p, const std::string &stage, const Plan &plan, con
 // after the header. Big-endian words; the word at +0x30 of records / lights / sun is 4 raw bytes. Blocks 16-aligned in
 // header order, 0xaa fill.
 std::shared_ptr<Blob> convert_light_table(const Pak &p, AutoPages &P, const std::function<std::optional<std::vector<std::string>>(const std::vector<uint32_t> &)> &gobo,
-                                          std::shared_ptr<PakWItem> &item, bool tunnel_probes, size_t *approx) {
+                                          std::shared_ptr<PakWItem> &item, bool tunnel_probes, size_t *approx, const std::string &stage) {
     const auto its = p.items_of("LIGHT_TABLE_1");
     if (its.empty()) return nullptr;   // sky levels: retail PS4 sky paks carry no LIGHT_TABLE_1 either
     const PakItem &it = its[0];
@@ -2436,6 +2552,12 @@ std::shared_ptr<Blob> convert_light_table(const Pak &p, AutoPages &P, const std:
     if (auto d = block(0x28); d && cnt8) parts[0x30] = words(head(*d, 0x3cull * cnt8), 0x30, 0x3c);
     if (auto d = block(0x30); d && nlocal) parts[0x40] = words(head(*d, 0x48ull * nlocal), 0x30, 0x48);
     if (auto d = block(0x34)) parts[0x48] = cat(words(head(*d, 0x3c), 0x30, 0x3c), Bytes(4, 0xaa));
+    // London train (ldn-train-multi, -lit): the sun intensity (+0x38) is the retail London levels' 886.71; the PS3 pak
+    // stores 886.7106
+    if ((stage == "ldn-train-multi" || stage == "ldn-train-multi-lit") && parts.count(0x48) && parts[0x48].size() >= 0x3c) {
+        const float sun = 886.71f;
+        std::memcpy(&parts[0x48][0x38], &sun, 4);
+    }
     std::vector<std::string> gobo_names;
     std::vector<size_t> gobo_str;
     if (auto d = block(0x38); n18 && d && d->size() >= 0xa0ull * n18) {

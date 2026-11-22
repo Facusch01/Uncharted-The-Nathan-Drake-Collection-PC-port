@@ -60,6 +60,17 @@ void read_materials(const Pak &p, std::vector<Mat3> &out, std::vector<Tex3> &tex
     }
 }
 
+// The weapon mod icons of the in-match HUD (clip size, reload speed, damage, accuracy, ...): PS3's own 128x128 textures
+// with 8 mip levels. The HUD draws them at ~33 px; PS3 shows mip level ~1.6 there, PS4 sampled ~2.5 (the 32 and 16 px
+// copies) and drew them blurred. They keep their two largest levels only (the VRAM_DESC mip count; the texels stay), so
+// no draw samples below 64 px; menus draw them larger and are not affected.
+uint32_t hud_icon_mips(const PakTexture &t) {
+    static const char *ICONS[] = {"clipsize", "reload-speed", "major-damage", "major-damage_trans", "accuracy", "max-ammo", "blindfire-accuracy", "scope-zoom"};
+    for (const char *n : ICONS)
+        if (t.width == 128 && ("/" + t.path).find("/net/" + std::string(n) + ".tga/") != std::string::npos) return std::min<uint32_t>(t.mips, 2);
+    return t.mips;
+}
+
 }  // namespace
 
 // ------------------------------------------------------------------------------------------------ net.pak
@@ -126,7 +137,7 @@ Bytes convert_net(const fs::path &ps3_path, const fs::path &ref_path, const NetO
         db->u64(0).u64(voff).u32(tiled.size()).u32(t.hash);
         db->u32(1).u32(fmt4);
         db->u32(fmt4 == 0x48 || fmt4 == 0x4b || fmt4 == 0x4e ? 0x010f0000 : 0x01000000);
-        db->u32(t.mips).u32(t.width).u32(t.height).u32(0).u32(3);
+        db->u32(hud_icon_mips(t)).u32(t.width).u32(t.height).u32(0).u32(3);
         db->ptr(db, 0x40);
         db->cstr(u8(full4));
         tex_entries.push_back({t.hash, shrt, full4, p0.item("VRAM_DESC", db), name_item});

@@ -74,7 +74,7 @@ the sky rows too (dctools/ps4stage.cpp sky_convert).
 |---|---|
 | `manifest.tsv` / `manifest.json` | reference: overlay, path, size, sha256, mtime of all 15 541 overlay files (`recipe_tools make_manifest`, recipe_tools.cpp) |
 | `provenance.tsv` | per file: class and source (`recipe_tools provenance`, from the hash tables below) |
-| `lists/*.tsv` | copy lists of the copy steps (destination, archive, entry, size, sha256); `levels-*.txt`, `hat-colour-only.txt` name lists |
+| `lists/*.tsv` | copy lists of the copy steps (destination, archive, entry, size, sha256); `levels-*.txt` name lists |
 | `steps/ORDER.txt`, `steps/NNN-<id>.json` | the step registry (see `ADDING-A-FIX.md`); `make_steps.py` regenerates the initial set |
 | `gather_tools.py` | tool collector (the driver and the verifier are C++: `../importer`, `u3import --recipe` / `--verify-output`) |
 | `GAPS.md` | what cannot be regenerated and why |
@@ -116,16 +116,25 @@ converted pak run once the conversion exists.
    normal-map blends, gloss and stripes reach every level that needs them, not only the 8 paks the old `map-colors2`
    step was locked to; that step is retired; the Airstrip steps `orange-wall` and `excess-wall`, which edited
    air-multi-strip.pak by byte offset in an older converter's output and fail on the latest one, are retired too: the
-   Airstrip strip level (the take-off cutscene scenery) is to be fixed in the converter)
+   Airstrip strip level (the take-off cutscene scenery) is to be fixed in the converter;
+   1.30.0: the level, character and net.pak fix-up steps are converter rules, so each pak is written once, already
+   fixed: `dctools/ps4stage.cpp` writes shadow-only flags on every shadow blocker, leaves the own-lightmap-UV flag off
+   instance submeshes with zero-lightmap triangles, collapses Facility's far shell (Prototype360), swaps Fort's
+   stone-steps layers, gives the London train levels the retail sun and gives a PS3 blend from a normal map's blue
+   channel its grey blend map (`dctools/normal_blend.cpp`: the former in-step map-colors2 pass, which rebuilt the
+   finished pak; its vertex-colour and stripe cases matched no level and are not kept); `plan.tsv` builds every Shade Arena spawner pak
+   from the shared 43-spawner source; `dctools/ps4mats.cpp` keeps the HUD mod icons' two largest mips; jobs.tsv's
+   `am` rows build the character parts on retail material templates (the former actor-materials / hat-colour /
+   airport-igc2 rebuilds). Steps removed: facility-collapse, skin-textures, borneo-water-jitter, map-colors-lightmap,
+   borneo-grass-leaf, actor-materials, hat-colour, airport-igc2, shade-npc-paks, london-fade, map-lighting, vram-gap,
+   hud-mod-mips; the water jitter, grass leaf, fade records and VRAM gap were already the converter's own output)
    `convert-dc2-part-modules` (runnable since 1.10.0: `tools/fixes/part-emitters`, the recovered batch45/batch48
    particle converter); `convert-banks`, `convert-text1` (runnable since 1.1.0)
 3. `registry-pak23` (mkregistry)
-4. session fixes in application order: `facility-collapse`, `lab-registration`*, `elim-pic`*,
-   `classic-netgames`*, `skins-net-names`*, `maps-batch`*, `rpcn-menu-page`*, `skin-textures`, `wall-emblem`,
-   `borneo-water-jitter`, `map-colors-lightmap`, `borneo-grass-leaf`, `coop-voice-fort`, `hair-key`*, `eula-pages`,
-   `actor-materials`, `coop-desc-fix`, `hat-colour`, `airport-igc2`,
-   `enemy-stall-option-defaults`, `emblem-cap3`, `coop-audit-option-defaults`, `shade-npc-paks`, `coop-voice-all`,
-   `london-fade`, `airport-igc3`, `map-lighting`, `vram-gap`, `hud-mod-mips` (recipe 1.18.0: the weapon mod icons of the in-match HUD keep their two largest mip levels, as sharp as on PS3) (* = dctools steps: restored 2026-11-05, verified sha256-identical from their backups with `tools/dcconv/verify_dctools_chain.py`; maps-batch is now `maps-batch-dc` + `maps-batch-files`, and `eula-menu-box` follows `rpcn-menu-page`)
+4. session fixes of the DC / bin data in application order: `lab-registration`*, `elim-pic`*,
+   `classic-netgames`*, `skins-net-names`*, `maps-batch-dc`*, `eula-menu-box`*, `coop-voice-fort`, `hair-key`*,
+   `eula-pages`, `coop-desc-fix`, `enemy-stall-option-defaults`, `coop-audit-option-defaults`, `coop-voice-all`,
+   `airport-igc3` (* = dctools steps: restored 2026-11-05, verified sha256-identical from their backups with `tools/dcconv/verify_dctools_chain.py`; maps-batch is now `maps-batch-dc` + `maps-batch-files`, and `eula-menu-box` follows `rpcn-menu-page`). No step patches a converted level or actor pak any more (recipe 1.30.0)
 5. `registry-final` (pak23_ps4.txt of the four overlays, line provenance), `remove-lab` (recipe 1.15.0: no Lab maps on
    PC; deletes the Lab level / actor paks and Lab map pictures older imports have and strips the Lab blocks of
    pak23_ps4.txt; `levels-lab`, `levels-maps-batch` and `maps-batch-files` are retired, convert-actors skips the 48
@@ -153,9 +162,9 @@ converted pak run once the conversion exists.
 Per-file order where several fixes touch one file (from the transcripts): `net.bin`: netfix -> lab_reg ->
 elim_pic -> classic -> skins -> apply_maps -> hair_key -> coop_desc_fix -> coop_vox -> netgame_order (rerun
 `classic` after any net.bin rebuild; netgame_order last). `modules.bin`: lab_reg -> elim_pic -> skins size table ->
-apply_maps -> mk_rpcn -> apply_vo -> coop_vox -> netgame_order (net size word). `air-multi.pak`: air_emblem -> mapcolor -> mapcolor2 -> london. `air-multi-strip.pak`:
-excess -> london -> vram_gap. `facility-multi.pak`: collapse -> london. `ss-multiplayer/*.bin`: ssfix ->
-option_defaults -> option_defaults_2. `vox*.bin`: apply_vo -> coop_vox.
+apply_maps -> mk_rpcn -> apply_vo -> coop_vox -> netgame_order (net size word). `ss-multiplayer/*.bin`: ssfix ->
+option_defaults -> option_defaults_2. `vox*.bin`: apply_vo -> coop_vox. Level, actor and net.pak files have one
+writer each, their converter step.
 
 ## Timing (this PC, Python 3.15, NVMe)
 

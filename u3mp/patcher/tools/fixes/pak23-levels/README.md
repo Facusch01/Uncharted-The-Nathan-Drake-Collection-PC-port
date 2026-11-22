@@ -47,8 +47,8 @@ levels.cpp for every stage row; the sky rows always had them):
 | 98 | water materials on the best-scoring retail water.fx template (`data/water_templates.json`); the water collision layer was already right |
 | n014 | ldn-train-multi-tunnel: light probes 3 and 4 take probe 5's data (a bad PS3 bake that lit the player white) |
 
-batch100 A / B (shadow blockers) and n012 (Museum blockers and fades) are covered by the later steps map-lighting and
-london-fade and by the converter's own fade records. Checked on the player's files: 0 of the 116 paks those batches
+batch100 A / B (shadow blockers) and n012 (Museum blockers and fades) are covered by the converter's shadow-only blocker
+rule and its own fade records (recipe 1.30.0; before, the steps map-lighting and london-fade). Checked on the player's files: 0 of the 116 paks those batches
 touched still has a LEVEL_INFO or lightmap-flag error (before: 60 and 52), no detail layer is black (before: 10), flat
 blend / tint / glow bindings 182 -> 80 (the rest are the cases the batches left open too).
 

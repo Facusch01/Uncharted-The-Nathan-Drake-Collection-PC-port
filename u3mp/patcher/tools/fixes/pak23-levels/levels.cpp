@@ -52,17 +52,9 @@ std::map<std::string, Row> g_emblem_stage;
 std::mutex g_actor_mu;
 std::map<std::pair<std::string, std::string>, std::vector<std::pair<std::string, Bytes>>> g_actors;   // (overlay, name) -> actors
 
-// The plan's sha256, or the one its note names as 'goty_sha256=<sha>': a Game of the Year disc without the DLC map packs
-// gives the DLC levels from goty-dlc.psarc, and a few of those sources differ from dlc-map1..4.psarc
-// (gompa-multi-shade-npc-ingame12: the GOTY copy already has the 43 spawners the shade-npc-paks step adds; that step
-// accepts it as it is)
-bool plan_sha(const Row &r, const std::string &h) {
-    if (h == r.at("sha256")) return true;
-    auto n = r.find("note");
-    if (n == r.end()) return false;
-    const size_t k = n->second.find("goty_sha256=");
-    return k != std::string::npos && n->second.compare(k + 12, 64, h) == 0 && h.size() == 64;
-}
+// The plan's sha256 (a Game of the Year disc without the DLC map packs gives the DLC levels from goty-dlc.psarc; every
+// row's source is the same there)
+bool plan_sha(const Row &r, const std::string &h) { return h == r.at("sha256"); }
 
 std::vector<Row> plan_rows() {
     std::vector<Row> rows;
@@ -248,13 +240,6 @@ fs::path ps3_source(const Row &row, const std::map<std::pair<std::string, std::s
     return p;
 }
 
-// the converter pass map-colors2 on a built stage or sky pak (PS3 normal-map blends, gloss, stripes); the pak as built
-// when the pass finds nothing to do
-Bytes with_map_colors2(Bytes built, const std::string &name, const Bytes &ps3) {
-    if (auto fixed = map_colors2_pass(built, name + ".pak", ps3, nullptr)) return std::move(*fixed);
-    return built;
-}
-
 // overlay-r3 hud.pak: the PS4 game kept small copies of two HUD textures (gun-galil-trans, the distress font); their
 // full-size PS3 DXT1 texels are tiled 1:1 as PS4 BC1 and appended to the VRAM in this order. Only the two VRAM_DESC
 // records (VRAM offset, size, format 0x47, mips, width, height, flag 3) and the header VRAM size change.
@@ -338,7 +323,7 @@ Bytes build(const Row &row, const std::map<std::pair<std::string, std::string>, 
         o.texdict = texdict;
         o.plan_dir = g_tmp / "sky" / upath(row.at("overlay")) / upath(lv) / "work";
         o.default_lightmaps = default_lightmap_texels();
-        return with_map_colors2(stage::sky_convert(sp, lv, o, upath(g_here + "/data/water_templates.json")), row.at("name"), read_file(sp));
+        return stage::sky_convert(sp, lv, o, upath(g_here + "/data/water_templates.json"));
     }
     if (m == "vischeat") return vischeat_convert(ps3_source(row, idx));   // C++ (dctools/vischeat.cpp)
     if (m == "ingame") {   // C++ (dctools/ps4ingame.cpp); a '<map>-multi-ingame12' row also places the level's wall-emblem spawners
@@ -382,7 +367,7 @@ Bytes build(const Row &row, const std::map<std::pair<std::string, std::string>, 
     o.emblem_walls = wallemblem::emblem_level(row.at("name"));
     const fs::path ps3 = ps3_source(row, idx);
     const Bytes p3 = read_file(ps3);
-    Bytes lv = with_map_colors2(stage::stage_convert(ps3, o), row.at("name"), p3);
+    Bytes lv = stage::stage_convert(ps3, o);
     if (auto s = g_emblem_stage.find(row.at("name")); s != g_emblem_stage.end() && s->second.at("overlay") == row.at("overlay")) {
         auto act = wallemblem::actors(Pak(p3, utf8(ps3)), row.at("name"), Pak(lv, row.at("name") + ".pak"), ps4main() / "actor33" / "ps4");
         std::lock_guard<std::mutex> l(g_actor_mu);
