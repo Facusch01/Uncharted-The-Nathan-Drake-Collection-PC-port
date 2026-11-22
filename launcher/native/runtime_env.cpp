@@ -210,6 +210,17 @@ const std::map<std::string, std::vector<std::pair<std::string, std::vector<std::
     return t;
 }
 
+// Game code fixes held as pokes on every start. Uncharted 3: net event type 60 (vtable 0x16d41f0) writes each entry
+// value with the game's 64-bit bit-stream writer (the call at 0x6e1868 to 0x1273330, its only caller) while its reader
+// takes 32 bits per value. The 32 extra bits per entry make the receiver misread the rest of the packet: the reliable
+// events after it are lost although the packet counts as delivered, so co-op guests miss enemies, box progress,
+// checkpoints and cutscenes. The poke points that call at the game's 32-bit writer 0x1272f90 (the value's low half is
+// what the reader keeps), so the sender writes what the receiver reads.
+const std::map<std::string, std::vector<std::string>> &fix_pokes() {
+    static const std::map<std::string, std::vector<std::string>> t = {{"big3-ps4_Shipping.elf", {"6e1869=00b91723"}}};
+    return t;
+}
+
 // ------------------------------------------------------------------------------------------------ environment
 
 struct Env {
@@ -353,9 +364,12 @@ Env build(const Inputs &in, std::vector<std::string> &prints, std::string &captu
     else if (speed == "1.75") factor = 1.75f;
     auto s = game_speed_offsets().find(exe);
     if (factor == 1.0f || s == game_speed_offsets().end()) speed.clear();
-    if ((!wanted.empty() || rewards || !quality.empty() || !speed.empty()) && !env.has("GOW3_POKE")) {
+    auto fixes = fix_pokes().find(exe);
+    if ((!wanted.empty() || rewards || !quality.empty() || !speed.empty() || fixes != fix_pokes().end()) &&
+        !env.has("GOW3_POKE")) {
         if (game_version(in.game) >= "01.02") {
             std::vector<std::string> pokes, named;
+            if (fixes != fix_pokes().end()) pokes = fixes->second;
             auto c = cheats().find(exe);
             for (const std::string &w : wanted)
                 if (c != cheats().end())
@@ -390,7 +404,7 @@ Env build(const Inputs &in, std::vector<std::string> &prints, std::string &captu
                 for (size_t i = 0; i < pokes.size(); ++i) v += (i ? "," : "") + pokes[i];
                 env.set("GOW3_POKE", v);
             }
-        } else {
+        } else if (!wanted.empty() || rewards || !quality.empty() || !speed.empty()) {
             prints.push_back("Cheats, unlocked rewards and game speed skipped: they require update 1.02");
         }
     }
