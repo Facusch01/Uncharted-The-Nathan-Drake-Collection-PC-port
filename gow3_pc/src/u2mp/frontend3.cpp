@@ -374,15 +374,21 @@ void ask_leave() {
 
 // ---- per-frame update (page event 6) ----
 
+// The players a matchmaking room needs before the vote starts: 2 (issue 104: every competitive mode); a playlist of
+// co-op games only (types 4, 8, 9, 12) starts with 1, as solo co-op does outside matchmaking (solocoop.cpp).
+// UNCHARTED_U2MP_MM_MIN (1..10) overrides it for tests of small online rooms.
+// TODO: (Tha14): attention to this as matchmaking was not fully tested at this point in time
 int matchmaking_min_players() {
-    // Read once; a test setting for small online rooms.
-    static const int value = [] {
+    static const int forced = [] {
         const char *s = std::getenv("UNCHARTED_U2MP_MM_MIN");
-        if (!s) return 2;
-        const int v = std::atoi(s);
-        return v >= 1 && v <= 10 ? v : 2;
+        const int v = s ? std::atoi(s) : 0;
+        return v >= 1 && v <= 10 ? v : 0;
     }();
-    return value;
+    if (forced) return forced;
+    std::vector<int32_t> types;
+    bool coop_only = playlist_game_types(types);
+    for (const int32_t t : types) coop_only = coop_only && (t == 4 || t == 8 || t == 9 || t == 12);
+    return coop_only ? 1 : 2;
 }
 
 void host_start_matchmaking_step() {

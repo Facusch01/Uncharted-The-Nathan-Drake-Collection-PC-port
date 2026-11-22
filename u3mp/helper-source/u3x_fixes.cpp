@@ -34564,9 +34564,24 @@ U3X_FN uint32_t clamp_max(const uint8_t *p) {
     if (v > 10) v = 10;
     return v;
 }
-U3X_FN uint32_t clamp_min(const uint8_t *p, uint32_t max) {
-    uint32_t v = p ? rd<uint32_t>(p, 0x18) : 2;
-    if (v < 2) v = 2;
+// v7.237 issue 104: every playlist starts with 2 players (the server's playlist minimums, 4 to 6, kept PC rooms
+// waiting), as Uncharted 2's matchmaking does; the room still fills up to the playlist's maximum. Three Team Deathmatch
+// (its net games are of type 1: three teams of two) starts with 3, one player per team. v7.238: a co-op playlist (at
+// most 3 players: adventure, arena) starts with 1, as solo co-op does outside matchmaking.
+// TODO: (Tha14): attention to this as matchmaking was not fully tested at this point in time
+U3X_FN bool three_teams(const uint8_t *p, void *s) {
+    const uint8_t *list = p ? rd<const uint8_t *>(p, 0x30) : nullptr;   // {count, pad, items of {net game name, weight}}
+    const uint8_t *items = ptr_ok(list) && rd<uint32_t>(list, 0) ? rd<const uint8_t *>(list, 8) : nullptr;
+    const uint8_t *t = ptr_ok(items) ? u3x_sym_table(s, 0x3b9a067du) : nullptr;   // the net game table, entries of 0xd0
+    const uint8_t *e = t ? rd<const uint8_t *>(t, 8) : nullptr;
+    if (!ptr_ok(e)) return false;
+    const uint32_t name = rd<uint32_t>(items, 0);
+    for (int32_t i = 0; i < rd<int32_t>(t, 0); i++)
+        if (rd<uint32_t>(e, static_cast<uintptr_t>(i) * 0xd0) == name) return rd<uint32_t>(e, static_cast<uintptr_t>(i) * 0xd0 + 0xc) == 1;
+    return false;
+}
+U3X_FN uint32_t clamp_min(const uint8_t *p, uint32_t max, void *s) {
+    uint32_t v = three_teams(p, s) ? 3 : max <= 3 ? 1 : 2;   // v7.237 #104; v7.238: co-op with 1
     if (v > max) v = max;
     return v;
 }
@@ -34694,7 +34709,7 @@ U3X_FN void follow_leader(uintptr_t base, void *s) {
     uint32_t *o = u3h_onm();
     const uint8_t *pl = picked_playlist(base, s);
     o[O_MAX] = clamp_max(pl);
-    o[O_MIN] = clamp_min(pl, o[O_MAX]);
+    o[O_MIN] = clamp_min(pl, o[O_MAX], s);   // v7.237 #104: s for the net game types
     o[O_ARMED] = 1;
     o[O_RUNNING] = 1;
     o[O_PHASE] = 2;
@@ -34725,7 +34740,7 @@ U3X_FN void start_search(uintptr_t base, void *s, uint32_t pg, uint32_t ns, uint
         o[O_SELECTED] = 0;
         const uint8_t *pl = picked_playlist(base, s);
         o[O_MAX] = clamp_max(pl);
-        o[O_MIN] = clamp_min(pl, o[O_MAX]);
+        o[O_MIN] = clamp_min(pl, o[O_MAX], s);   // v7.237 #104: s for the net game types
         o[O_IN_ROOM] = 0;
         o[O_MERGING] = 0;
         at<int32_t>(base + SEARCH_PHASE) = 0;
