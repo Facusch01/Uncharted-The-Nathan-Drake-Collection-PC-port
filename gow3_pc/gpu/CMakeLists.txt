@@ -241,6 +241,9 @@ if (WIN32)
     add_executable(debug-menus-test EXCLUDE_FROM_ALL ../tests/test_debug_menus.cpp ../src/debug_menus.cpp ${GOW3_U3FIX})
     target_compile_options(debug-menus-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
     target_include_directories(debug-menus-test PRIVATE ../src)
+    # u2mp party roster wire test (no game needed): ninja -C out/gpu u2mp-roster-test
+    add_executable(u2mp-roster-test EXCLUDE_FROM_ALL ../tests/test_u2mp_roster.cpp)
+    target_compile_options(u2mp-roster-test PRIVATE -Wall -Wextra -Werror)
     # u2mp cinema file store test (no game needed): ninja -C out/gpu u2mp-cinema-test
     add_executable(u2mp-cinema-test EXCLUDE_FROM_ALL ../tests/test_u2mp_cinema.cpp ../src/u2mp/cinema_store.cpp)
     target_compile_options(u2mp-cinema-test PRIVATE -Wall -Wextra -Werror)

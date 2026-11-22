@@ -24,6 +24,7 @@
 #include "net.h"
 #include "online.h"
 #include "progression.h"
+#include "roster_wire.h"
 #include "session_api.h"
 #include "u2mp_internal.h"
 #include "grenades.h"
@@ -494,16 +495,8 @@ void broadcast_roster() {
     std::vector<uint8_t> b{kRoster};
     for (int s = 0; s < kSlots; ++s) {
         if (!members[s].used) continue;
-        std::string name = cut(members[s].name, 31);
-        b.push_back(uint8_t(s));
-        b.push_back(uint8_t(name.size()));
-        b.push_back(members[s].rank);
-        b.insert(b.end(), name.begin(), name.end());
-        const std::string hero = cut(members[s].hero, 47), villain = cut(members[s].villain, 47);
-        b.push_back(uint8_t(hero.size()));
-        b.insert(b.end(), hero.begin(), hero.end());
-        b.push_back(uint8_t(villain.size()));
-        b.insert(b.end(), villain.begin(), villain.end());
+        roster_wire::put(b, {uint8_t(s), members[s].rank, cut(members[s].name, 31), cut(members[s].hero, 47),
+                             cut(members[s].villain, 47)});
     }
     send_raw(-1, b, -1);
     if (!online::active()) return;
@@ -540,7 +533,8 @@ void broadcast_teams() {
 void sync_local_skins() {
     const char *hero = unlocks_local_skin();
     const char *villain = unlocks_local_villain();
-    std::string h = hero ? hero : "", v = villain ? villain : "";
+    // Compared as sent (cut to 47), so a long package name echoed back by the roster is no change.
+    const std::string h = cut(hero ? hero : "", 47), v = cut(villain ? villain : "", 47);
     for (Member &m : members) {
         if (!m.used || m.net_id != my_id) continue;
         if (m.hero == h && m.villain == v) return;
@@ -610,14 +604,11 @@ void on_roster(const uint8_t *d, size_t size) {
     uint8_t teams[kSlots];
     for (int s = 0; s < kSlots; ++s) teams[s] = members[s].team;
     clear_members();
-    size_t at = 1;
-    while (size - at >= 3) {
-        uint8_t slot = d[at], len = d[at + 1], rank = d[at + 2];
-        if (slot > 10 || at + 3 + len > size) break;
-        Member &m = members[slot];
+    for (const roster_wire::Entry &e : roster_wire::read(d, size, 1, uint8_t(kSlots - 1))) {
+        Member &m = members[e.slot];
         m.used = true;
-        m.net_id = slot_net_id(slot);
-        m.name.assign(reinterpret_cast<const char *>(d + at + 3), len);
+        m.net_id = slot_net_id(e.slot);
+        m.name = e.name;
         if (m.name.empty() || m.name == "@") {
             const std::string room_name = online::room_member_name(m.net_id);
             if (!room_name.empty()) {
@@ -625,23 +616,10 @@ void on_roster(const uint8_t *d, size_t size) {
                 log("party: roster name for net id %u was empty or @; using %s", m.net_id, m.name.c_str());
             }
         }
-        m.rank = rank;
-        m.team = teams[slot];
-        size_t next = at + 3 + len;
-        if (next < size) {
-            const uint8_t n = d[next];
-            if (next + 1 + n <= size) {
-                m.hero.assign(reinterpret_cast<const char *>(d + next + 1), n);
-                next += 1 + n;
-            } else {
-                next = size;
-            }
-        }
-        if (next < size) {
-            const uint8_t n = d[next];
-            if (next + 1 + n <= size) m.villain.assign(reinterpret_cast<const char *>(d + next + 1), n);
-        }
-        at = next;
+        m.rank = e.rank;
+        m.team = teams[e.slot];
+        m.hero = e.hero;
+        m.villain = e.villain;
     }
     roster_synced = false;
     int used = 0;
@@ -651,8 +629,11 @@ void on_roster(const uint8_t *d, size_t size) {
         if (m.net_id == my_id) roster_synced = true;
     }
     if (!roster_synced && my_id != 0 && transport.local_slot() < kSlots) {
-        members[transport.local_slot()] =
-            Member{true, my_id, my_name, "", "", uint8_t(local_rank()), uint8_t(local_team())};
+        // Our skins went out with our info already; empty ones here would read as a change and resend it.
+        const char *hero = unlocks_local_skin(), *villain = unlocks_local_villain();
+        members[transport.local_slot()] = Member{true, my_id, my_name, cut(hero ? hero : "", 47),
+                                                 cut(villain ? villain : "", 47), uint8_t(local_rank()),
+                                                 uint8_t(local_team())};
         roster_synced = true;
         ++used;
     }
