@@ -44,46 +44,43 @@ bool readable(const void *p, size_t n) {
 #endif
 }
 
+// the guest return addresses up the frame chain, as text
+void describe(char *chain, size_t size, const uint64_t *f) {
+    size_t used = 0;
+    chain[0] = 0;
+    for (int i = 0; i < 8 && readable(f, 16) && used < size; i++) {
+        const uint64_t ret = f[1];
+        if (in_image(ret))
+            used += std::snprintf(chain + used, size - used, " guest %#llx",
+                                  static_cast<unsigned long long>(ret - reinterpret_cast<uint64_t>(g_image)));
+        else
+            used += std::snprintf(chain + used, size - used, " %#llx", static_cast<unsigned long long>(ret));
+        const uint64_t *next = reinterpret_cast<const uint64_t *>(f[0]);
+        if (next <= f) break;
+        f = next;
+    }
+}
+
 // the counter, the target, the mode (0: equal, 1: at most) and the wait function's frame pointer
 // A counter below 0 has had more jobs finish than were started on it (Syria co-op, 20 Nov 2026: -1 and -36, with the
-// jobs' queues empty and every worker idle). A wait for 0 can never end then, and the counter object would go back to
-// the pool still negative. All its jobs are done, so it is set to 0 and the wait ends, as it would have with the right
-// count. Reported with the waiting code's return addresses.
-bool settle_negative(const unsigned char *counter, int64_t target, const uint64_t *frame) {
-    if (target != 0 || !readable(counter + 0x20, 8)) return false;
-    int64_t *value = reinterpret_cast<int64_t *>(const_cast<unsigned char *>(counter) + 0x20);
-    int64_t seen = __atomic_load_n(value, __ATOMIC_ACQUIRE);
-    while (seen < 0)
-        if (__atomic_compare_exchange_n(value, &seen, int64_t{0}, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-            static std::atomic<unsigned> reports{0};
-            const unsigned n = ++reports;
-            if (n <= 50 || n % 100 == 0) {
-                uint64_t ret[3] = {};
-                const uint64_t *f = frame;
-                for (int i = 0; i < 3 && readable(f, 16); i++) {
-                    ret[i] = in_image(f[1]) ? f[1] - reinterpret_cast<uint64_t>(g_image) : f[1];
-                    const uint64_t *next = reinterpret_cast<const uint64_t *>(f[0]);
-                    if (next <= f) break;
-                    f = next;
-                }
-                char story[768];
-                counter_story(counter, story, sizeof story);
-                std::printf("Uncharted 3: job counter %p was %lld (more jobs finished than started); set to 0 so the wait "
-                            "ends; callers %#llx %#llx %#llx (time %u); history: %s\n",
-                            static_cast<const void *>(counter), static_cast<long long>(seen),
-                            static_cast<unsigned long long>(ret[0]), static_cast<unsigned long long>(ret[1]),
-                            static_cast<unsigned long long>(ret[2]), n, story);
-                std::fflush(stdout);
-            }
-            return true;
-        }
-    return false;
+// jobs' queues empty and every worker idle). A wait for exactly 0 can never end then. Once it has stayed below 0 for
+// 100 ms and no job counted on it is unfinished (job_trace.cpp), all its jobs are done: it is set to 0 and its waiting
+// jobs released (stuck_counter.cpp), as the right count would have done. While a counted job is still to finish it is
+// left alone: releasing the waiters then would let them go on before that job's work is done. (Before 22 Nov 2026 it
+// was set to 0 at once, also while jobs on it were still to come, and parked jobs waiting on it were not released.)
+// A parked job's wait on such a counter is settled by the checker below (stuck_counter.cpp).
+bool settle_negative(const unsigned char *counter, int64_t target, int mode, int64_t waited_ms, const uint64_t *frame) {
+    if (target != 0 || mode != 0 || waited_ms < 100 || !readable(counter + 0x20, 8)) return false;
+    const int64_t seen = __atomic_load_n(reinterpret_cast<const int64_t *>(counter + 0x20), __ATOMIC_ACQUIRE);
+    if (seen >= 0 || pending_jobs(counter) != 0) return false;
+    char chain[256];
+    describe(chain, sizeof chain, frame);
+    return settle_counter_now(const_cast<unsigned char *>(counter), seen, chain);
 }
 
 __attribute__((sysv_abi)) void counter_wait_sleep(const unsigned char *counter, int64_t target, int mode,
                                                   const uint64_t *frame) {
     settle_stuck_counters();   // the ones the checker below asked for: this thread holds no job system lock
-    if (settle_negative(counter, target, frame)) return;   // the loop sees 0 and ends
     using clock = std::chrono::steady_clock;
     thread_local const unsigned char *waiting_on = nullptr;
     thread_local clock::time_point since;
@@ -97,6 +94,8 @@ __attribute__((sysv_abi)) void counter_wait_sleep(const unsigned char *counter, 
         reported = false;
     }
     last = now;
+    const int64_t waited_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - since).count();
+    if (settle_negative(counter, target, mode, waited_ms, frame)) return;   // the loop sees 0 and ends
     if (!reported && now - since >= std::chrono::seconds(5)) {
         reported = true;
         int64_t value = 0;
@@ -106,26 +105,12 @@ __attribute__((sysv_abi)) void counter_wait_sleep(const unsigned char *counter, 
         thread = GetCurrentThreadId();
 #endif
         char chain[512];
-        size_t used = 0;
-        chain[0] = 0;
-        const uint64_t *f = frame;
-        for (int i = 0; i < 8 && readable(f, 16); i++) {
-            const uint64_t ret = f[1];
-            if (in_image(ret))
-                used += std::snprintf(chain + used, sizeof chain - used, " guest %#llx",
-                                      static_cast<unsigned long long>(ret - reinterpret_cast<uint64_t>(g_image)));
-            else
-                used += std::snprintf(chain + used, sizeof chain - used, " %#llx", static_cast<unsigned long long>(ret));
-            if (used >= sizeof chain) break;
-            const uint64_t *next = reinterpret_cast<const uint64_t *>(f[0]);
-            if (next <= f) break;
-            f = next;
-        }
+        describe(chain, sizeof chain, frame);
         char bytes[3 * 0x40 + 1];
         bytes[0] = 0;
         if (readable(counter, 0x40))
             for (int i = 0; i < 0x40; i++) std::snprintf(bytes + 3 * i, 4, "%02x ", counter[i]);
-        char queues[128], story[768];
+        char queues[128], story[1200];
         job_queue_counts(queues, sizeof queues);
         counter_story(counter, story, sizeof story);
         std::printf("Uncharted 3: counter wait over 5 s on thread %lu: counter %p value %lld, waiting for %s %lld; "
@@ -156,22 +141,6 @@ std::atomic_flag g_job_waits_lock = ATOMIC_FLAG_INIT;
 void lock_waits() { while (g_job_waits_lock.test_and_set(std::memory_order_acquire)) std::this_thread::yield(); }
 void unlock_waits() { g_job_waits_lock.clear(std::memory_order_release); }
 
-void describe(char *chain, size_t size, const uint64_t *f) {
-    size_t used = 0;
-    chain[0] = 0;
-    for (int i = 0; i < 8 && readable(f, 16) && used < size; i++) {
-        const uint64_t ret = f[1];
-        if (in_image(ret))
-            used += std::snprintf(chain + used, size - used, " guest %#llx",
-                                  static_cast<unsigned long long>(ret - reinterpret_cast<uint64_t>(g_image)));
-        else
-            used += std::snprintf(chain + used, size - used, " %#llx", static_cast<unsigned long long>(ret));
-        const uint64_t *next = reinterpret_cast<const uint64_t *>(f[0]);
-        if (next <= f) break;
-        f = next;
-    }
-}
-
 bool reached(const unsigned char *counter, int64_t target, int mode, int64_t &value) {
     value = 0;
     if (!readable(counter + 0x20, 8)) return true;
@@ -179,10 +148,10 @@ bool reached(const unsigned char *counter, int64_t target, int mode, int64_t &va
     return mode == 1 ? value <= target : value == target;
 }
 
-// returns 1 when the counter was settled (the stub then returns without the job system's wait)
+// The wait is recorded; the stub always goes on to the job system's wait (a counter below 0 is settled by the checker,
+// stuck_counter.cpp, once no job counted on it is left). Returns 1 only to skip that wait, which nothing asks for now.
 __attribute__((sysv_abi)) int job_counter_wait(const unsigned char *counter, int64_t target, int mode,
                                                const uint64_t *frame) {
-    if (settle_negative(counter, target, frame)) return 1;
     int64_t value = 0;
     if (reached(counter, target, mode, value)) return 0;
     lock_waits();
@@ -216,7 +185,7 @@ void check_job_waits() {
                                 std::chrono::duration_cast<std::chrono::milliseconds>(now - w.since).count(), w.chain);
             if (w.reported || now - w.since < std::chrono::seconds(3)) continue;
             w.reported = true;
-            char queues[128], story[768];
+            char queues[128], story[1200];
             job_queue_counts(queues, sizeof queues);
             counter_story(w.counter, story, sizeof story);
             std::printf("Uncharted 3: job waiting over 3 s: counter %p value %lld, waiting for %s %lld; callers%s; "

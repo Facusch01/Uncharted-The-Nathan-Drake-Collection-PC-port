@@ -1,5 +1,6 @@
 // u3fix_hook.h: what the u3fix fixes share: finding code by its bytes, stub pages within jump range of the image, jumps.
 #pragma once
+#include <stddef.h>
 #include <stdint.h>
 
 namespace u3fix {
@@ -20,11 +21,13 @@ bool raise_net_process_pool(unsigned char *image, uint64_t size);
 bool install_package_log(unsigned char *image, uint64_t size);
 // a job counter wait that lasts over 5 s is reported with its counter and callers (counter_wait_log.cpp)
 bool install_counter_wait_log(unsigned char *image, uint64_t size);
-// a parked job's wait for 0 that can never end is ended after 4 s (stuck_counter.cpp)
+// a parked job's wait that can never end is ended when its work is done (stuck_counter.cpp)
 bool install_stuck_counter(unsigned char *image, uint64_t size);
 // asks for the counter to be settled when the wait can never end; true when asked
 bool consider_stuck_wait(const unsigned char *counter, int64_t target, int mode, int64_t value, int64_t waited_ms,
                          const char *chain);
+// sets the counter from seen to 0 and releases its waiting jobs; on a game thread that holds no job system lock
+bool settle_counter_now(unsigned char *counter, int64_t seen, const char *chain);
 // settles the counters asked for: called on a game thread that holds no job system lock
 void settle_stuck_counters();
 // a job the job system drops because its priority queue is full is reported (job_queue_full_log.cpp)
@@ -39,9 +42,25 @@ bool install_script_errors_log(unsigned char *image, uint64_t size);
 bool install_retarget_log(unsigned char *image, uint64_t size);
 // skeleton retargets switch to their multiplayer settings while a net game runs, as on PS3 (retarget_mode.cpp)
 bool install_retarget_mode(unsigned char *image, uint64_t size);
-// every job counter's history: maker, job count, jobs finished (job_trace.cpp)
+// every job counter's recent history and the jobs counted on it; reports the moment a count goes wrong (job_trace.cpp)
 bool install_job_trace(unsigned char *image, uint64_t size);
 void counter_story(const void *counter, char *out, size_t size);
+// jobs submitted on the counter that have not finished (-1: not a pool counter or no trace)
+int64_t pending_jobs(const void *counter);
+// what went wrong in the counter's current life (CounterTrouble bits); life: how many times it was made
+enum CounterTrouble : uint32_t {
+    kCounterReused = 1,      // made while jobs counted on its last life were unfinished
+    kCounterBelowZero = 2,   // a job took it from 0 to -1
+    kCounterFreedBusy = 4,   // given back while jobs counted on it were unfinished
+    kCounterSettled = 8,     // the runtime settled it
+};
+uint32_t counter_trouble(const void *counter, uint32_t *life);
+void note_settled(const void *counter, int64_t from);
+// the job manager (nullptr before the trace is installed) and its counter update (counter, new value): takes the job
+// lock and releases the jobs waiting for that value
+const unsigned char *job_manager();
+using CounterUpdate = void(__attribute__((sysv_abi)) *)(unsigned char *, int64_t);
+CounterUpdate counter_update_function();
 // the jobs waiting in each of the 8 priority queues, as text (job_queue_full_log.cpp)
 void job_queue_counts(char *out, size_t size);
 // an NPC copy on a co-op guest starts its base animation at a finite phase (npc_phase.cpp)
