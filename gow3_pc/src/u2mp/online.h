@@ -120,6 +120,9 @@ bool member_address(uint32_t net_id, net::Address &out);
 void online_migrated(bool host, bool matchmaking);
 // online.cpp -> session.cpp: the host is gone and nobody took over: the old "host lost" path.
 void online_host_gone();
+// online.cpp -> session.cpp: the player signed out of RPCN in the launcher: the game's own "network error" path (error
+// box, leaving multiplayer), for the host and for the others alike.
+void online_signed_out();
 // A running match may go on under a new host (PS3 HostMigrate at the match start, not in co-op).
 bool match_migration_ok();
 // The net id of the player with this NpId (from the host's kIds), 0 unknown.

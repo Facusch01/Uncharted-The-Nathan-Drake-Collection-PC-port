@@ -1489,6 +1489,13 @@ void online_host_gone() {
     host_lost = true;
 }
 
+void online_signed_out() {
+    if (!active) return;
+    log("party: signed out of RPCN in the launcher: leaving online play");
+    g(kNetInfo)[0x1c] = 1;   // the pages show the network error box and leave
+    host_lost = true;        // the transport closes on the next frame (frame_work)
+}
+
 bool match_migration_ok() {
     if (!active || hosting || !online::active()) return false;
     const char *env = std::getenv("UNCHARTED_U2MP_HOST_MIGRATION");

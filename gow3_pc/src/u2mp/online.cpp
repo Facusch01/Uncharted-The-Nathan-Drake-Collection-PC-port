@@ -1029,6 +1029,10 @@ void on_event(const U2oEvent &e) {
             session::online_match_ready(0);
         }
         break;
+    case U2O_EV_SIGNED_OUT:   // the launcher signed out on purpose: no rejoin through a session that is gone
+        log("online: signed out of RPCN in the launcher%s", started ? ": leaving online play" : "");
+        if (started) session::online_signed_out();
+        break;
     case U2O_EV_WORLD:
         world_req = 0;
         if (e.error) {
@@ -1454,7 +1458,7 @@ void frame() {
         }
     }
     // the link went down (launcher reconnect, network): open it again every 15 s while in multiplayer
-    const char *relay_env = std::getenv("UNCHARTED_U2MP_RELAY");   // signed in in the launcher (never logged)
+    const char *relay_env = std::getenv("UNCHARTED_U2MP_RELAY");   // the launcher's relay (never logged)
     if (started && link_opened && relay_env && *relay_env && (link_state == U2O_FAILED || link_state == U2O_OFF) &&
         t >= next_link_try) {
         next_link_try = t + 15;

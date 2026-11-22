@@ -22,7 +22,7 @@ Status: **built, not run on two PCs yet**. Friends / presence / invites / matchm
 | Variable | Set by | Meaning |
 |---|---|---|
 | `UNCHARTED_U2MP_ONLINE_EXE` | launcher, when the online extension is installed | full path of `u2_online.exe` |
-| `UNCHARTED_U2MP_RELAY` | launcher, when signed in | the local relay handed to `u2o_open` (never logged) |
+| `UNCHARTED_U2MP_RELAY` | launcher, when its account has a saved login (signed in or not) | the local relay handed to `u2o_open` (never logged) |
 | `UNCHARTED_U2MP_NAME` | launcher | the online name (player name, room name, roster) |
 | `UNCHARTED_U2MP_NPID` | launcher | this player's NpId (skips ourselves in member lists, logs) |
 | `UNCHARTED_U2MP_JOIN` | manual only | LAN join by address; when set, online stays off |
@@ -132,7 +132,13 @@ All online lines start with `u2mp: online:`. In order of a test:
 
 ABI 2 of `u2_online.exe` (then `u2_online.dll`) adds the player's identity, the RPCN friend list (from the launcher's Login reply plus the
 friend news it forwards), presence and messages. The launcher relay also replays friend presence changes to a
-game that links later.
+game that links later. Friends added, accepted or removed in the launcher while the game runs arrive the same way
+(RPCN tells the launcher's session, the relay forwards it), so the list is current without a restart.
+
+Sign-out in the launcher: `u2_online.exe` reports `U2O_EV_SIGNED_OUT` (then `U2O_EV_LINK_LOST`). In multiplayer,
+`session::online_signed_out()` takes the game's own network-error path (net info `+0x1c` = 1: the error box and
+leaving, the transport closes on the next frame, host or not). The link opens again on the next Multiplayer entry
+and works once the player has signed in again in the launcher (no restart).
 
 | Piece | PS3 | PC |
 |---|---|---|

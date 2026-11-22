@@ -45,6 +45,8 @@ enum : int32_t {
     U2O_EV_MESSAGE = 17,        // message: a player sent us a message (an invite: main_type U2O_MSG_INVITE)
     U2O_EV_SCORES = 18,         // u2o_get_scores: scores[count], total (records on the board); u2o_record_score:
                                 // error only, state = our rank on that board
+    U2O_EV_SIGNED_OUT = 19,     // the player signed out of RPCN in the launcher (U2O_EV_LINK_LOST follows); the link opens
+                                // again only after a new sign-in there (an older u2_online.exe never sends it)
 };
 
 // U2O_EV_FRIEND states
