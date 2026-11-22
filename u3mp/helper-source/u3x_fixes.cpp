@@ -451,27 +451,38 @@ extern "C" U3X_FN uint32_t u3x_ring_state(const uint8_t *cmd, const uint32_t *en
     return got;
 }
 
-// ===== event diagnostic (v7.112): which game events go to and come from which peer =====
-// 2026-11-12 Syria, 3 players: the host started the round (its round start event ran, co-op stage 1) but neither guest ever
-// ran the round start (stage 0 all match: they could not move, no enemies). Nothing logged events per peer. This watches the
-// game transport's queues of every connection (helper gt_pump, sub = entry +0x40): +0x110 reliable and +0x120 unreliable
-// (to send), +0x138 received (after a read), nodes {+0 event, +0x20 next}. Each kind of event (its vtable, as an image
-// offset) is logged the first time it shows up per peer and queue: "U3MP ev: peer P id I sends|got T vt 0x...". Every
-// 30 s per peer a summary of the record counters (acked / lost) and queue lengths. Kinds are kept in a small table (the
-// helper's data region is nearly full): 24 kinds, peers 0..3.
+// ===== event queues (v7.112 diagnostic; v7.240 received-queue safety net) =====
+// Every 30 s per peer a summary of the game transport's record counters (acked / lost) and queue lengths of each
+// connection (helper gt_pump, sub = entry +0x40): +0x110 reliable and +0x120 unreliable to send, +0x130 received
+// reliable events waiting for their turn; nodes {+0 event, +8 number, +0x10 extra data, +0x20 next}.
+//
+// v7.240 (#58: guests without enemies, grenades that never go off, a box that never opens, guests left out of the exit
+// cutscene; two-PC and three-PC co-op only). The game delivers received reliable events strictly in number order: a
+// connection's events wait at +0x130 until the head's number equals the next expected one (+0x148), and the number on
+// the wire has 7 bits, widened against +0x148. A packet the game stops reading part-way (an event it cannot read ahead
+// of the reliable section) has already been acknowledged, so its reliable events are never sent again: from then on
+// every later event of that connection waits forever, and once more than 128 wait the 7-bit numbers wrap and newer
+// events land on old numbers (looks like many copies). After every data packet this keeps the queue moving:
+//   - a head numbered below the next expected one (a late second copy) is dropped;
+//   - a head numbered above it that has waited 1 s (60 pump ticks): the missing numbers are given up, +0x148 moves to
+//     the head, and the game delivers the waiting events with its next read. A connection can send ~35 reliable events
+//     a second, so a gap is given up long before the 7-bit numbers could wrap (128); a whole-queue clear on a count
+//     (tried in the stop-gap watcher) dropped real events at that rate and is not done.
+// Dropped events are freed as the game frees them (reference count at +10, slot 1 when it reaches 0; extra data and node
+// through the transport's allocator). Each case is logged.
 namespace {
-constexpr int kKinds = 24, kPeers = 4, kQueues = 3;
+constexpr int kPeers = 32, kQueues = 3;
 }
 struct U3xEv {
-    uint32_t vt[kKinds];                      // event vtable - base
-    uint8_t seen[kKinds][kQueues];            // bit p: logged for peer p
-    uint32_t lines, next_sum[kPeers];
+    uint32_t lines, next_sum[kPeers], stuck[kPeers];   // stuck: pump tick the head started waiting (0 = not waiting)
 };
 U3X_BSS static U3xEv u3x_ev;
 
-U3X_RO static const char t_ev[] = "U3MP ev: peer ", t_id[] = " id ", t_q0[] = " sends reliable", t_q1[] = " sends unreliable",
-    t_q2[] = " got", t_vt[] = " event vt ", t_full[] = " (kind table full)", t_sum[] = " summary: records acked ",
-    t_lost[] = " lost ", t_rq[] = ", queued reliable ", t_uq[] = " unreliable ", t_gq[] = " received ";
+extern "C" [[gnu::visibility("hidden")]] void u3h_gt_free(uintptr_t base, void *p);   // the transport allocator (C part)
+
+U3X_RO static const char t_ev[] = "U3MP ev: peer ", t_id[] = " id ", t_sum[] = " summary: records acked ", t_lost[] = " lost ",
+    t_rq[] = ", queued reliable ", t_gq[] = " received ", t_drop[] = " dropped waiting events ",
+    t_evskip[] = " gave up missing events ", t_to[] = "..";
 
 namespace {
 [[gnu::always_inline]] inline uint32_t qlen(const uint8_t *sub, uintptr_t off) {
@@ -482,39 +493,59 @@ namespace {
 }
 }  // namespace
 
+namespace {
+// one queue note: "U3MP ev: peer P<what>A<sep>C" (kept out of line: the formatting is large)
+U3X_FN [[clang::minsize]] void ev_note(uintptr_t b, Log log, uint32_t peer, const char *what, uint32_t a, uint32_t c) {
+    if (u3x_ev.lines >= 300) return;
+    u3x_ev.lines++;
+    Line l;
+    l.s(t_ev).d(peer).s(what).d(a).s(t_to).d(c);
+    log(b, l.z());
+}
+// frees one received node and its event as the game does when it has delivered one
+[[gnu::always_inline]] inline void free_received(uintptr_t b, uint8_t *node) {
+    uint8_t *ev = *reinterpret_cast<uint8_t **>(node);
+    if (ptr_ok(ev) && --ev[10] == 0) reinterpret_cast<void (*)(void *)>((*reinterpret_cast<uintptr_t **>(ev))[1])(ev);
+    if (void *extra = *reinterpret_cast<void **>(node + 0x10)) u3h_gt_free(b, extra);
+    u3h_gt_free(b, node);
+}
+}  // namespace
+
 // queue: 0 reliable, 1 unreliable, 2 received; peer = connection entry index; id = its player id (entry +0x34)
-extern "C" U3X_FN [[clang::minsize]] void u3x_ev_scan(uintptr_t b, uint32_t peer, int32_t id, const uint8_t *sub, uint32_t queue, uint32_t frame,
+extern "C" U3X_FN [[clang::minsize]] void u3x_ev_scan(uintptr_t b, uint32_t peer, int32_t id, const uint8_t *csub, uint32_t queue, uint32_t frame,
                                    Log log) {
-    if (!ptr_ok(sub) || peer >= static_cast<uint32_t>(kPeers) || queue >= static_cast<uint32_t>(kQueues) || !log) return;
-    // v7.225: received reliable events wait at +0x130 (+0x138 is this side's own events acked out of order); events
-    // that arrive in order run inside the read and never wait there, so "received" counts only the out-of-order ones
-    const uintptr_t off = queue == 0 ? 0x110u : queue == 1 ? 0x120u : 0x130u;
-    const uint8_t *n = *reinterpret_cast<const uint8_t *const *>(sub + off);
-    for (int k = 0; n && ptr_ok(n) && k < 64; k++, n = *reinterpret_cast<const uint8_t *const *>(n + 0x20)) {
-        const uint8_t *ev = *reinterpret_cast<const uint8_t *const *>(n);
-        if (!ptr_ok(ev)) continue;
-        const uintptr_t vtp = *reinterpret_cast<const uintptr_t *>(ev);
-        if (vtp < b || vtp - b > 0x4000000u) continue;
-        const uint32_t vt = static_cast<uint32_t>(vtp - b);
-        int s = 0;
-        while (s < kKinds && u3x_ev.vt[s] && u3x_ev.vt[s] != vt) s++;
-        if (s == kKinds) continue;
-        if (!u3x_ev.vt[s]) u3x_ev.vt[s] = vt;
-        if (u3x_ev.seen[s][queue] & (1u << peer)) continue;
-        u3x_ev.seen[s][queue] |= static_cast<uint8_t>(1u << peer);
-        if (u3x_ev.lines >= 300) continue;
-        u3x_ev.lines++;
-        Line l;
-        l.s(t_ev).d(peer).s(t_id).d(static_cast<uint32_t>(id)).s(queue == 0 ? t_q0 : queue == 1 ? t_q1 : t_q2).s(t_vt).x(vt, 8);
-        if (s == kKinds - 1) l.s(t_full);
-        log(b, l.z());
+    if (!ptr_ok(csub) || peer >= static_cast<uint32_t>(kPeers) || queue >= static_cast<uint32_t>(kQueues) || !log) return;
+    uint8_t *sub = const_cast<uint8_t *>(csub);
+    if (queue == 2) {
+        uint8_t **head = reinterpret_cast<uint8_t **>(sub + 0x130);
+        uint32_t &expected = *reinterpret_cast<uint32_t *>(sub + 0x148);
+        uint32_t dropped = 0, first = 0;
+        while (*head && ptr_ok(*head) && static_cast<int32_t>(rd<uint32_t>(*head, 8) - expected) < 0) {
+            uint8_t *node = *head;
+            if (!dropped) first = rd<uint32_t>(node, 8);
+            *head = *reinterpret_cast<uint8_t **>(node + 0x20);
+            free_received(b, node);
+            dropped++;
+        }
+        const uint32_t next = *head ? rd<uint32_t>(*head, 8) : expected;
+        if (!*head || next == expected) {
+            u3x_ev.stuck[peer] = 0;
+        } else if (!u3x_ev.stuck[peer]) {
+            u3x_ev.stuck[peer] = frame | 1u;
+        } else if (frame - u3x_ev.stuck[peer] >= 60u) {
+            ev_note(b, log, peer, t_evskip, expected, next - 1u);
+            expected = next;
+            u3x_ev.stuck[peer] = 0;
+        }
+        if (dropped) ev_note(b, log, peer, t_drop, first, first + dropped - 1u);   // numbers as they were (a wrapped queue is not consecutive)
+        return;
     }
     if (queue == 0 && frame >= u3x_ev.next_sum[peer] && u3x_ev.lines < 300) {   // every ~30 s (frames of the pump tick)
         u3x_ev.next_sum[peer] = frame + 1800;
         u3x_ev.lines++;
         Line l;
         l.s(t_ev).d(peer).s(t_id).d(static_cast<uint32_t>(id)).s(t_sum).d(rd<uint32_t>(sub, 0xb0)).s(t_lost).d(rd<uint32_t>(sub, 0xac));
-        l.s(t_rq).d(qlen(sub, 0x110)).s(t_uq).d(qlen(sub, 0x120)).s(t_gq).d(qlen(sub, 0x130));
+        l.s(t_rq).d(qlen(sub, 0x110)).s(t_gq).d(qlen(sub, 0x130));
         log(b, l.z());
     }
 }
@@ -12417,9 +12448,12 @@ U3X_FN void write_commands(uintptr_t base, uint8_t *bs, List list, int32_t param
             o.depth += 1;
         } else if (kind == K_BLEND_PREV) {
             depth_check(&o);
+            const uint32_t back = static_cast<uint32_t>(o.last_slot) - field<uint32_t>(cmd, 4);
+            // v7.239: a slot the receiver's stack does not reach (PS4 NPC lists, after commands beyond the layer limit
+            // were left out) is not written: the receiver would give the whole state up. The receiver skips it too.
+            if ((back & 3u) > static_cast<uint32_t>(o.depth - 1)) continue;
             u3x_bsw(bs, 3, 2);
             u3x_bsw(bs, 0, 3);
-            const uint32_t back = static_cast<uint32_t>(o.last_slot) - field<uint32_t>(cmd, 4);
             if (back & ~3u) ec()[69] += 1;
             u3x_bsw(bs, back, 2);
         }
@@ -12753,8 +12787,10 @@ extern "C" U3X_FN void u3x_decode_anim(void *visitor, uint8_t *bits, uint32_t nb
             u3x_v_blend(v, weight, a, b, into, mode);
         } else if (sub == 0) {   // reference to an earlier slot (depth 0 wraps and never fails)
             const uint32_t back = u3x_bits_read(r, 2);
-            if (depth - 1 < back) { u3x_v_error(v, 5); break; }
-            u3x_v_sub0(v, depth - back - 1);
+            // v7.239: a reference below the bottom of the stack is left out and the walk goes on. PS3 only asserts here
+            // (its packer never wrote one); PS4 NPC command lists make older packers write it, and stopping the whole
+            // snapshot (former error 5) left every NPC on a co-op guest in the fallback pose (flying / T-posing).
+            if (depth - 1 >= back) u3x_v_sub0(v, depth - back - 1);
         } else if (sub == 2) {
             u3x_v_sub2(v);
         } else if (sub == 3) {
@@ -42489,6 +42525,7 @@ void u3h_smn_got(const uint8_t *m, uint32_t id);
 void u3h_smn_unknown(const uint8_t *m, uint32_t n);
 int u3h_smn_up(void);
 int u3h_ol_up(void);
+int u3x_lso_active(void);   // v7.239: the launcher has the account signed out (end of the file)
 
 // this part (spec 2.2)
 void u3x_onb_member_link(uintptr_t base, uint8_t *ss, const char *name);
@@ -42934,8 +42971,10 @@ U3X_FN uint32_t u3x_onb_msg_in(void *be) {
 }
 
 // The backend's Update slot: takes in what arrived, message by message.
+// v7.239 (launcher sign-out): "no connection" while the launcher has the account signed out (u3x_lso_active).
 U3X_FN int64_t u3x_onb_s1(void *be) {
     using namespace g13p2;
+    if (u3x_lso_active()) return -1;
     uint8_t *buffer = static_cast<uint8_t *>(be) + BE_BUFFER;
     uint32_t *count = &fld<uint32_t>(be, BE_COUNT);
 
@@ -44734,4 +44773,43 @@ extern "C" U3X_FN [[clang::minsize]] void u3x_jip_heard(const uint8_t *id) {
     using namespace jorder;
     for (int k = 0; k < 16; ++k) heard[k] = id[k];
     u3h_fj_note(t_heard, id, nullptr, -1);
+}
+
+// ===== launcher sign-out (lso): the launcher's relay says its RPCN session was signed out on purpose =====
+// The launcher's relay (U3MP_RELAY) sends its own notification 0x7f01 (empty body) before it closes the game's link
+// when the player signs out there (Disconnect, another login), and as the only packet on a link made while the launcher
+// is signed out. From then on: no automatic sign-in again through a session that is gone, no sign-in of the game's own
+// (the player chose to be signed out), and the online backend's Update (u3x_onb_s1, G13) reports "no connection" while in
+// multiplayer, so the game takes its own disconnected path (net error: "Disconnected" dialog and back to the root page;
+// in a match, its lost-connection handling). Every 10 s a new link is tried; it works again as soon as the launcher is
+// signed in. (Kept small: region B has little room left.)
+extern "C" {
+int32_t u3x_loc_now(uintptr_t base);
+}
+namespace lso {
+U3X_BSS uint32_t signed_out;
+U3X_BSS int32_t next_try;
+}  // namespace lso
+
+// RPCN thread: a notification (or the first packet of a link) of this type; 1 = it was the launcher's sign-out.
+// Type 0xffffffff: signed in through the launcher again (the sign-out is over).
+extern "C" U3X_FN [[clang::minsize]] int u3x_lso_note(uint32_t type) {
+    if (type != 0x7f01) {
+        if (type == ~0u) __atomic_store_n(&lso::signed_out, 0u, __ATOMIC_RELEASE);
+        return 0;
+    }
+    __atomic_store_n(&lso::signed_out, 1u, __ATOMIC_RELEASE);
+    return 1;
+}
+
+// 1 while the launcher has the account signed out
+extern "C" U3X_FN [[clang::minsize]] int u3x_lso_active(void) { return __atomic_load_n(&lso::signed_out, __ATOMIC_ACQUIRE) != 0; }
+
+// game thread, while no RPCN thread runs: 1 = try a new link now (every 10 s, 300 clock ticks a second, while signed out)
+extern "C" U3X_FN [[clang::minsize]] int u3x_lso_retry(uintptr_t base) {
+    if (!lso::signed_out) return 0;
+    const int32_t now = u3x_loc_now(base);
+    if (now - lso::next_try < 0) return 0;
+    lso::next_try = now + 3000;
+    return 1;
 }

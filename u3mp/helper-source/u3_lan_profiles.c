@@ -903,6 +903,9 @@ __attribute__((visibility("hidden"))) void u3x_onb_peer_begin(uintptr_t base,uin
 __attribute__((visibility("hidden"))) void u3x_onb_info(void *in,const uint8_t *r);
 __attribute__((visibility("hidden"))) uint32_t u3x_onb_msg_in(void *be);
 __attribute__((visibility("hidden"))) int64_t u3x_onb_s1(void *be);
+__attribute__((visibility("hidden"))) int u3x_lso_note(uint32_t type);   /* launcher sign-out (lso), C++ */
+__attribute__((visibility("hidden"))) int u3x_lso_active(void);
+__attribute__((visibility("hidden"))) int u3x_lso_retry(uintptr_t base);
 __attribute__((visibility("hidden"))) int64_t u3x_onb_s_nop(void);
 __attribute__((visibility("hidden"))) void u3x_onb_vtable(void);
 __attribute__((visibility("hidden"))) int u3x_handle_obj_valid(uint8_t *h);
@@ -6078,6 +6081,7 @@ PLX static void so_on_message(RcMem *m,const uint8_t *p,const uint8_t *e){   /* 
  * comment, u32 size, data} */
 PLX static void so_notify(RcMem *m,uint32_t type,uint32_t sz){
  const uint8_t *p=m->pkt+15,*e=m->pkt+sz;const char *nm;int i;
+ if(u3x_lso_note(type))return;   /* lso: the launcher signed out (its relay's own notification) */
  if(type==5){if(so_str(&p,e))m->so_c[SC_FRQ_RX]++;return;}
  if(type==6){if(p>=e)return;uint8_t on=*p++;if(!(nm=so_str(&p,e)))return;i=so_fr_find(m,nm);
   if(i<0&&m->nfr<RC_MAXF){i=m->nfr;so_fr_store(m,i,nm,on,0,0,0,0,0);m->nfr=i+1;}else if(i>=0)so_fr_store(m,i,0,on,0,0,0,0,0);
@@ -6391,7 +6395,7 @@ PLAT_THREAD_ATTR static PLAT_THREAD_RET rc_thread(void *arg){
  rc_plain=0;rc_rvia=0;
  if(rc_rport&&!rc_rdead){plat_sock f=plat_sock_open(2,1,0);   /* v7.89 rf23: the launcher's session (127.0.0.1) */
   if(f!=PLAT_BADSOCK&&plat_sock_connect(f,0x0100007fu,be16(rc_rport))>=0){rc_fd=f;rc_rvia=1;}
-  else{if(f!=PLAT_BADSOCK)plat_sock_close(f);rc_rdead=1;
+  else{if(f!=PLAT_BADSOCK)plat_sock_close(f);if(u3x_lso_active()){res=RC_E_CONN;goto out;}rc_rdead=1;   /* lso: signed out in the launcher: no sign-in of our own */
    static const char t_g[]="RPCN: the launcher's session is not there (launcher closed?): signing in directly";so_note(t_g,0,-1,0);}}
  if(rc_rvia){rc_plain=1;rc_state=RC_TLS;plat_sock_timeout(rc_fd,PLAT_SO_RCVTIMEO,30000);plat_sock_timeout(rc_fd,PLAT_SO_SNDTIMEO,10000);
   if(!rc_wr(m,(const uint8_t*)rc_rkey,32)){res=RC_E_CONN;goto out;}}
@@ -6399,7 +6403,7 @@ PLAT_THREAD_ATTR static PLAT_THREAD_RET rc_thread(void *arg){
  {plat_sock f=plat_sock_open(2,1,0);if(f==PLAT_BADSOCK){res=RC_E_CONN;goto out;}rc_fd=f;
   if(plat_sock_connect(f,rip,be16(31313))<0){X.room[14]=(uint32_t)plat_sock_err();res=RC_E_CONN;goto out;}}
  rc_state=RC_TLS;if(!plat_tls_handshake(&m->tls,rc_fd,rc_host)){res=RC_E_TLS;goto out;}}
- {uint32_t c,sz;int t=rc_packet(m,&c,&sz);if(t!=3){res=RC_E_LOST;goto out;}}   /* ServerInfo */
+ {uint32_t c,sz;int t=rc_packet(m,&c,&sz);if(t!=3){if(t==2)u3x_lso_note(c);res=RC_E_LOST;goto out;}}   /* ServerInfo (lso: or the launcher's "signed out") */
  rc_state=RC_LOGIN;
  if(!rc_is_derived(rp_val[RP_PASS])){char d[72];rc_derive(rp_val[RP_PASS],d);rp_set(RP_PASS,d,64);clear(d,sizeof(d));rc_dirty=1;}   /* x034 */
  {uint8_t q[200];uint32_t n=0;for(int f=RP_ID;f<=RP_TOKEN;f++){const char *v=rp_val[f];while(*v&&n<190)q[n++]=(uint8_t)*v++;q[n++]=0;}
@@ -6423,7 +6427,7 @@ PLAT_THREAD_ATTR static PLAT_THREAD_RET rc_thread(void *arg){
   rc_srv=done?1:2;nl_report(m);if(done)rc_ok_sum=rc_cfg_sum();}}
  if(__atomic_load_n(&rc_want,__ATOMIC_ACQUIRE)){   /* rc02: Connect pressed during the ticket step: same settings = this sign-in is it */
   if(rc_srv==1&&rc_ok_sum==rc_cfg_sum())__atomic_store_n(&rc_want,0,__ATOMIC_RELEASE);else goto out;}
- rc_state=RC_READY;ready=1;
+ rc_state=RC_READY;ready=1;u3x_lso_note(~0u);   /* lso: signed in again */
  /* stay connected: friends, presence, messages (v7.60 so01) and signaling lookups (pl01) */
  pl_rc_idle(m);
  res=RC_E_LOST;
@@ -6431,7 +6435,7 @@ out:
  {plat_sock f=__atomic_exchange_n(&rc_fd,(plat_sock)0,__ATOMIC_ACQ_REL);if(f)plat_sock_close(f);}   /* rc02: closed once (rc_restart may have taken it) */
  plat_tls_close(&m->tls);rc_plain=0;
  if(rc_rvia&&ready){static const char t_d[]="RPCN: the launcher's session link closed; signing in again";so_note(t_d,0,-1,0);}
- if(ready&&res==RC_E_LOST&&rc_srv==1&&!__atomic_load_n(&rc_want,__ATOMIC_ACQUIRE))rc_auto=1;   /* rc02: dropped after the sign-in, not asked: sign in again */
+ if(ready&&res==RC_E_LOST&&rc_srv==1&&!__atomic_load_n(&rc_want,__ATOMIC_ACQUIRE)&&!u3x_lso_active())rc_auto=1;   /* rc02: dropped after the sign-in, not asked: sign in again */
  if(res==RC_E_DUP&&rp_launcher&&rp_lh_dup<3&&!__atomic_load_n(&rc_want,__ATOMIC_ACQUIRE)){rp_lh_dup++;rc_auto=1;}   /* v7.59 lh01: the launcher's sign-out may still be on its way */
  m->nfr=0;rc_state=res;X.room[13]=(uint32_t)res;rc_running=0;return 0;}
 /* friends for PS3's NetFriends port (ONLINE-IFACE-A v3) */
@@ -6467,6 +6471,7 @@ EXT static void rc_auto_tick(uintptr_t base){
  if(rc_state==RC_READY&&rc_running){if(!rc_ready_t0)rc_ready_t0=now|1;else if(rc_auto_n&&now-rc_ready_t0>=120*OL_TICKS_S)rc_auto_n=0;}else rc_ready_t0=0;
  if(rc_running)return;
  if(rc_want){rc_auto=0;rc_tick();return;}
+ if(u3x_lso_retry(base)){rc_auto=0;rc_want=1;rc_tick();return;}   /* lso: signed out in the launcher: a new link every 10 s */
  if(!rc_auto)return;
  if(rc_auto==1){if(rc_auto_n>=5){rc_auto=0;return;}rc_auto_at=now+(3+5*(int32_t)rc_auto_n)*OL_TICKS_S;rc_auto=2;return;}
  if(now-rc_auto_at<0)return;
