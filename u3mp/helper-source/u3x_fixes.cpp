@@ -456,7 +456,7 @@ extern "C" U3X_FN uint32_t u3x_ring_state(const uint8_t *cmd, const uint32_t *en
 // connection (helper gt_pump, sub = entry +0x40): +0x110 reliable and +0x120 unreliable to send, +0x130 received
 // reliable events waiting for their turn; nodes {+0 event, +8 number, +0x10 extra data, +0x20 next}.
 //
-// v7.240 (#58: guests without enemies, grenades that never go off, a box that never opens, guests left out of the exit
+// v7.239 (#58: guests without enemies, grenades that never go off, a box that never opens, guests left out of the exit
 // cutscene; two-PC and three-PC co-op only). The game delivers received reliable events strictly in number order: a
 // connection's events wait at +0x130 until the head's number equals the next expected one (+0x148), and the number on
 // the wire has 7 bits, widened against +0x148. A packet the game stops reading part-way (an event it cannot read ahead
@@ -526,6 +526,21 @@ extern "C" U3X_FN [[clang::minsize]] void u3x_ev_scan(uintptr_t b, uint32_t peer
             *head = *reinterpret_cast<uint8_t **>(node + 0x20);
             free_received(b, node);
             dropped++;
+        }
+        // v7.240: a late second copy of an event already delivered is widened by the game to a number 128 ahead (its 7
+        // bits are below the next expected one's). When the FIRST waiting event is 64 or more ahead, everything waiting
+        // is such a copy: the sender writes an event only while its number is at most 64 past the last one acknowledged
+        // in order, so real events after a gap start right after it. They are all dropped, so a gap is never given up
+        // onto a copy (that skipped up to 127 real events and left the numbering 128 ahead of the sender's).
+        if (*head && ptr_ok(*head) && static_cast<int32_t>(rd<uint32_t>(*head, 8) - expected) >= 64) {
+            for (uint8_t *node = *head; node && ptr_ok(node);) {
+                uint8_t *after = *reinterpret_cast<uint8_t **>(node + 0x20);
+                if (!dropped) first = rd<uint32_t>(node, 8);
+                free_received(b, node);
+                dropped++;
+                node = after;
+            }
+            *head = nullptr;
         }
         const uint32_t next = *head ? rd<uint32_t>(*head, 8) : expected;
         if (!*head || next == expected) {
