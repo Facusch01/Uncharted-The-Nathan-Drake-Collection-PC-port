@@ -51,3 +51,18 @@ batch100 A / B (shadow blockers) and n012 (Museum blockers and fades) are covere
 london-fade and by the converter's own fade records. Checked on the player's files: 0 of the 116 paks those batches
 touched still has a LEVEL_INFO or lightmap-flag error (before: 60 and 52), no detail layer is black (before: 10), flat
 blend / tint / glow bindings 182 -> 80 (the rest are the cases the batches left open too).
+
+## Closer to PS3 (2026-11-22)
+
+Each rule checked against the PS3 levels (their textures and material texture lists) and the retail PS4 paks:
+
+| rule | where | effect (154 level paks measured) |
+|---|---|---|
+| a retail level pak holds only a resident 64x64 copy of each texture the game streams; the converted levels do not stream, so such a texture comes at full size from the PS4 texture dictionaries (`texturedict1/ps4`, same path and format, top mips above the PS3 texture's size left out), else from the PS3 texture | `stageplan.cpp` `dict_texture`, `ps4stage.cpp` `texture_for_full` | 10396 textures in 124 paks at full size instead of 64x64 (Desert: 139 of 143; the co-op London / Syria / Airport levels nearly all); VRAM of the built paks 1862 -> 3925 MB in all, at most ~1.3x the PS3 level's (PS4 normal maps are BC5) |
+| layers 4..6 are the specular colour layers (retail binds its '-spec-mask' maps to Mask4 6275 times, Mask5 1133, Color4 1009, Mask6 549): not foreign to a PS3 material with a spec map, and a PS3 spec map counts as the mask it becomes (ps4stage binds it to a mask slot) | `stageplan.cpp` `v2_v23`, the role score | of the 30339 textures the PS3 materials list (lightmaps aside), 28463 -> 29241 are bound; spec-mask layers 2698 -> 3265 |
+| a PS3 material with two normal maps needs a template with a second normal slot | `v2_v23` | second normal maps 3325 -> 4025 |
+| a PS3 '-blend' map needs a template with a blend-map slot | the role score | blend-map materials 5531 -> 5580 |
+
+A moving PS3 material (scroll / flow) keeps its scroll first: the three planner terms do not apply to it. Render classes
+(blend / cut-off / two-sided) are unchanged. Open: san-upper-multi-stage is a retail pak (method windoff) and keeps its
+resident copies.

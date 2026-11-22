@@ -1267,17 +1267,33 @@ Bytes convert(const fs::path &ps3_path, const fs::path &tmpl_path, const Kw &kw,
                             if (!c->real) c->fmt4 = c->fmt4 == 0x47 ? 0x48 : c->fmt4 == 0x4d ? 0x4e : c->fmt4 == 0x4a ? 0x4b : c->fmt4;
                             break;
                         }
-                TexP de;
-                if (!c && !donors.empty()) {
-                    Ps3Tex *col = nullptr;
+                TexP de, own4;
+                Ps3Tex *col = nullptr;
+                if (!c)
                     for (Ps3Tex *x : own)
                         if (x->kind == "-color") { col = x; break; }
-                    if (col) {
-                        const std::string stem = before(col->shrt, ".tga");
-                        if (has(stem, "-color")) de = donor_texture(stem.substr(0, stem.rfind("-color")) + want[0]);
+                const std::string cstem = col ? before(col->shrt, ".tga") : std::string();
+                if (col && has(cstem, "-color")) {
+                    const std::string base = cstem.substr(0, cstem.rfind("-color")) + want[0];
+                    if (!donors.empty()) de = donor_texture(base);
+                    // PS4 first: the material's own map of the kind from the PS4 texture dictionaries, named after its
+                    // colour map, when the PS3 pak lacks it (the MP Talbot suit / head / hands spec masks: PS4 textures,
+                    // flat on the PS3 parts), at most the colour map's size
+                    if (!de && !opt.texdict.empty() && !has(cstem, "art/general/textures/default/")) {
+                        const std::string s4 = base + ".tga";
+                        if (auto it = tcache.find("dict:" + s4); it != tcache.end()) own4 = it->second;
+                        else if (auto t = stage::dict_texture_short(opt.texdict.parent_path(), s4, col->w, col->h)) {
+                            const size_t k = t->path.find(cook_prefix());
+                            const std::string sh = k != std::string::npos ? t->path.substr(k + cook_prefix().size()) : t->path;
+                            auto r = [&](size_t o) { return rd32le(&t->desc[o]); };
+                            own4 = add_texture(sh, r(0x14), r(0x1c), r(0x28), r(0x2c), r(0x24), t->texels, r(0x34), r(0x20));
+                            own4->full = t->path;
+                            tcache["dict:" + s4] = own4;
+                        }
                     }
                 }
                 if (c) e.lazy = c;
+                else if (own4) e.e = own4;
                 else {
                     // am: a material with known PS3 textures does not borrow another character's map for a kind it lacks
                     e.e = opt.am && mn && has_mattex(*mn) ? flat_texture(want[0]) : de;

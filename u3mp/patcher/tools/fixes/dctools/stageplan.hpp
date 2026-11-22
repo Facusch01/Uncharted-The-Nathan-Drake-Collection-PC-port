@@ -116,5 +116,17 @@ Bundle extract_req(const fs::path &pak_dir, const std::vector<std::pair<std::str
 std::vector<std::string> pak_techs(const fs::path &pak);   // a retail pak's EFFECT technique string table
 // the two retail default lightmap textures (default-lightmap0/1, from grave-02-hollowhulk-front-low)
 std::vector<BundleTex> default_lightmaps(const fs::path &pak_dir);
+// A retail level pak keeps only a small resident copy (64x64) of the textures the game streams; their full-size texels
+// are in the PS4 texture dictionaries (texturedict1/ps4 next to pak_dir's pak23). The dictionary's descriptor and texels
+// of the texture at 'path' (same type and format as 'desc'), its top mips above max_w x max_h left out, when that is
+// larger than 'desc': desc / texels replaced, true.
+bool dict_texture(const fs::path &pak_dir, const std::string &path, uint32_t max_w, uint32_t max_h, Bytes &desc, Bytes &texels);
+// a texture of the dictionaries in dict_dir by its short path ('art/.../x-spec-mask.tga'): full cook path, VRAM_DESC
+// data (0x40 bytes) and texels, its top mips above max_w x max_h left out (2D textures only)
+struct DictTexture {
+    std::string path;
+    Bytes desc, texels;
+};
+std::optional<DictTexture> dict_texture_short(const fs::path &dict_dir, const std::string &shrt, uint32_t max_w, uint32_t max_h);
 
 }  // namespace u3::stage

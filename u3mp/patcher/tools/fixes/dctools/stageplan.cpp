@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <fstream>
 #include <mutex>
 #include <regex>
@@ -387,6 +388,7 @@ struct FeatSet {
     bool border = false;
     bool specular = false, envspec = false;   // FINAL_COLOR_ADD_SPECULAR_LIGHT / SPECULAR_LIGHT_ADD_ENVIRONMENT
     bool tmap = false, talpha = false;   // the alpha from a transparency map (its own slot or shared texture 1); talpha: from the A channel of shared texture 1
+    bool normal2 = false;   // a second normal map: layer 2's own (NORMAL_2_USE_NORMAL_MAP) or a detail normal
 };
 struct Survey {
     std::vector<SKey> keys;
@@ -461,6 +463,7 @@ FeatSet feat_set(const std::vector<std::string> &uniq) {
         fs.border = fs.border || has(x, "BORDER_TINT");
         fs.tmap = fs.tmap || x == "TRANSPARENCY_USE_TRANSPARENCY_MAP" || starts_with(x, "TRANSPARENCY_MAP_USE_SHARED_TEXTURE_1_");
         fs.talpha = fs.talpha || x == "TRANSPARENCY_MAP_USE_SHARED_TEXTURE_1_A";
+        fs.normal2 = fs.normal2 || x == "NORMAL_2_USE_NORMAL_MAP" || (starts_with(x, "NORMAL_") && has(x, "_DETAIL_MAP"));
     }
     return fs;
 }
@@ -699,6 +702,7 @@ struct M3 {
     bool spec3 = false, env3 = false;  // the PS3 program adds specular light (g_specularBrightness > 0); and an env map
                                        // reflection (an env texture and g_specularEnvironmentStrength > 0)
     bool fres3 = false;                // the PS3 material sets g_fresnel* constants (the PS3 glass programs)
+    bool nrm2 = false;                 // the PS3 material has two normal maps of its own (one per layer)
     int two_sided = -1;                // the PS3 pass state draws both faces (1), culls (0), unknown (-1)
     unsigned uvfar = 0;                // bit d: g_uvScale<d> at least 1.5x away from 1 (a tiling only a UV_d scale carries)
     std::unordered_map<size_t, int> cache;   // feature set id -> v2 + v2.3 score
@@ -709,6 +713,9 @@ int v2_v23(const M3 &m, const FeatSet &f) {
     const bool blend3 = (m.r3 & R_BLEND) || m.two3;
     if (m.two3 && !f.blend12) pen -= 45;
     if (m.nrm3 && !f.normalmap) pen -= 15;
+    // U3: a PS3 material with two normal maps (one per blended layer) on a template with one normal slot loses the second
+    // (ps4stage binds the PS3 normals to Normal1, Normal2 / a detail normal in order)
+    if (!g_u2 && m.nrm2 && m.scr3.empty() && !f.normal2) pen -= 15;   // (a moving material keeps its scroll first)
     for (const std::string &need : m.scr3) {
         bool any = false;
         for (const std::string &x : f.feats) any = any || starts_with(x, need);
@@ -730,6 +737,11 @@ int v2_v23(const M3 &m, const FeatSet &f) {
     if (m.spec3 && !f.specular) pen -= 30;
     if (m.spec3 && m.env3 && (m.r3 & R_ENV) && !f.envspec) pen -= 10;
     unsigned allowed = blend3 ? 6u : 2u;   // {1, 2} / {1}
+    // U3: layers 4..6 are the specular colour layers: retail puts its '-spec-mask' maps in their mask slots (Mask4 6275 of
+    // the 9986 retail spec bindings, Mask5 1133, Color4 1009, Mask6 549). For a PS3 material with a spec map, which
+    // ps4stage binds to a template mask slot, they are not foreign: penalised, its spec map was dropped (Facility: 7 of its
+    // 176 materials kept a spec-mask layer, now 53)
+    if (!g_u2 && (m.r3 & R_SPEC) && m.scr3.empty()) allowed |= 0x70u;   // (a moving material keeps its scroll first)
     if (m.ov)   // a PS3 overlay layer: the template's overlay layers and features are needed, not foreign
         for (const std::string &x : f.feats) {
             int d;
@@ -1345,6 +1357,15 @@ Plan make_plan(const fs::path &ps3path, const fs::path &res, const fs::path &wat
             static const std::regex EMISSIVE("lamp|light|fire|glow|neon|screen|incand|emissive|sky");
             m.emissive = m.inc3 || rx(m.low, EMISSIVE);
             m.nrm3 = (m.r3 & R_NORMAL) != 0;
+            if (m.nrm3 && mi != m3.end() && !g_u2) {
+                static const std::regex HT(R"(/[0-9A-F]{16}\.ndb(\.error)?$)");
+                std::set<std::string> nrms;
+                for (uint32_t i : mi->second->textures) {
+                    const std::string s = std::regex_replace(short_of(texs3.at(i).name), HT, "");
+                    if (tex_role_final(s) == "normal") nrms.insert(s);
+                }
+                m.nrm2 = nrms.size() >= 2;
+            }
             // (a moving material keeps its scroll first: a second colour layer is not asked of the scrolling templates)
             if (two_cols && m.scr3.empty()) m.two3 = true;
             if (!g_u2)   // U3: the far tilings of the layers the PS3 material draws (layer 1; layer 2 of a two-layer one)
@@ -1413,7 +1434,13 @@ Plan make_plan(const fs::path &ps3path, const fs::path &res, const fs::path &wat
                 if (pass == 0 && std::find(c.m->f.begin(), c.m->f.end(), "ND_WATER_FLOW") == c.m->f.end()) continue;
                 if (pass == 1 && (!scroll_first || !carries(S->fsets[c.m->fsid]))) continue;
                 const SMat &sm = *c.m;
-                int score = popc(m.r3 & sm.r4) * 2 - popc(sm.r4 & ~m.r3) - popc(m.r3 & ~sm.r4);
+                // (U3: a PS3 spec map counts as the mask it becomes on PS4: ps4stage binds it to a template mask slot)
+                const unsigned r3 = !g_u2 && (m.r3 & R_SPEC) ? (m.r3 & ~R_SPEC) | R_MASK : m.r3;
+                int score = popc(r3 & sm.r4) * 2 - popc(sm.r4 & ~r3) - popc(r3 & ~sm.r4);
+                // U3: a PS3 '-blend' map is the factor its program blends the two layers by: a template without a blend-map
+                // slot blends by the vertex colour or a colour channel instead and the PS3 pattern is lost (Facility's
+                // concrete floors)
+                if (!g_u2 && (r3 & R_BLEND) && m.scr3.empty() && !(sm.r4 & R_BLEND)) score -= 12;
                 // (a render class the PS3 state proves outweighs every other term: a template that blends an opaque or
                 // alpha-tested surface draws it see-through, one that does not alpha-test an alpha-tested one draws its cut
                 // parts as solid cards. A cutoff template on an opaque PS3 surface stays a mild mismatch: the opaque PS3
@@ -1458,7 +1485,7 @@ Plan make_plan(const fs::path &ps3path, const fs::path &res, const fs::path &wat
                 auto ci = m.cache.find(sm.fsid);
                 if (ci == m.cache.end()) ci = m.cache.emplace(sm.fsid, v2_v23(m, S->fsets[sm.fsid])).first;
                 score += ci->second;
-                score -= 2 * popc(sm.r4 & ~m.r3);
+                score -= 2 * popc(sm.r4 & ~r3);
                 const int64_t score2 = int64_t(score) * 2 + (used[c.pak] > 0 ? 1 : 0);
                 if (!best || std::make_pair(score2, -int64_t(c.size)) > std::make_pair(best->score2, best->negsz)) best = Best{score2, -int64_t(c.size), &k, &c};
             }
@@ -1664,6 +1691,122 @@ std::vector<FxItem> closure(const XPak &x, const PakItem &eit) {
     }
     return out;
 }
+
+// The PS4 texture dictionaries (u3data/build/main/texturedict1/ps4/*.pak) hold the full-size texels of the textures the
+// retail game streams. A retail pak keeps only a small resident copy of such a texture (64x64 and its mips, VRAM_DESC
+// +0x20 bit 0x100) and the game streams the rest in; a converted level does not stream, so a texture taken from a retail
+// level pak drew as that 64x64 copy (Desert: 139 of its 143 textures). A dictionary pak is an ordinary pak: its header
+// and VRAM descriptors come first, its texels end the file; only the descriptors are read here, the texels of a texture
+// when it is used.
+struct DictTex {
+    fs::path file;
+    uint64_t off = 0, size = 0;
+    std::string path;
+    Bytes desc;   // the VRAM_DESC data (0x40 bytes)
+};
+struct Dicts {
+    std::map<std::string, DictTex> by_path;
+    std::map<std::string, const DictTex *> by_short;
+};
+const Dicts &texture_dicts(const fs::path &dir) {
+    static std::mutex lock;
+    static std::map<std::string, Dicts> all;
+    std::lock_guard<std::mutex> g(lock);
+    const std::string k = utf8(dir);
+    if (auto it = all.find(k); it != all.end()) return it->second;
+    Dicts &out = all[k];
+    std::error_code ec;
+    std::vector<fs::path> files;
+    for (const auto &e : fs::directory_iterator(dir, ec))
+        if (e.path().extension() == ".pak") files.push_back(e.path());
+    std::sort(files.begin(), files.end());
+    for (const fs::path &f : files) {
+        try {
+            const uint64_t fsize = fs::file_size(f);
+            std::ifstream in(f, std::ios::binary);
+            auto rd = [&](uint64_t a, uint64_t n) {
+                Bytes b(n);
+                in.seekg(std::streamoff(a));
+                in.read(reinterpret_cast<char *>(b.data()), std::streamsize(n));
+                if (!in) throw Stop("cannot read " + utf8(f));
+                return b;
+            };
+            const Bytes h = rd(0, 0x2c);
+            const uint32_t npages = rd32le(&h[0x10]), ptab = rd32le(&h[0x14]), vram = rd32le(&h[0x20]);
+            const Bytes pt = rd(ptab, uint64_t(npages) * 12);
+            uint64_t end = rd32le(&h[4]);
+            for (uint32_t i = 0; i < npages; i++) end = std::max<uint64_t>(end, uint64_t(rd32le(&pt[i * 12])) + rd32le(&pt[i * 12 + 4]));
+            if (end > fsize || vram > fsize) continue;
+            const Pak q(rd(0, end), utf8(f));
+            for (const PakTexture &t : q.textures()) {
+                DictTex d;
+                d.file = f;
+                d.off = fsize - vram + t.vramOffset;
+                d.size = t.vramSize;
+                d.path = t.path;
+                d.desc = slice(q, q.pbase(t.page) + t.off + 0x20, 0x40);
+                if (d.desc.size() == 0x40 && d.off + d.size <= fsize) out.by_path[t.path] = std::move(d);
+            }
+        } catch (const std::exception &) {   // an unreadable dictionary: its textures stay the resident copies
+        }
+    }
+    for (const auto &[p, d] : out.by_path) out.by_short.emplace(short_of(p), &d);   // (the first of a short path)
+    return out;
+}
+
+// a dictionary texture with its top mips above max_w x max_h left out (mips are stored top first, each padded to 8x8
+// blocks); a 2D texture of a known format only
+std::optional<DictTexture> dict_read(const DictTex &x, uint32_t max_w, uint32_t max_h) {
+    Bytes d = x.desc;
+    auto w = [&](size_t o) { return rd32le(&d[o]); };
+    if (w(0x18) != 1) return std::nullopt;
+    auto fi = tc::DXGI.find(w(0x1c));
+    if (fi == tc::DXGI.end()) return std::nullopt;
+    const bool comp = fi->second.first.rfind("BC", 0) == 0;
+    const uint32_t mips = w(0x24), tw = w(0x28), th = w(0x2c);
+    uint32_t n = 0;
+    while (n + 1 < mips && ((tw >> n) > max_w || (th >> n) > max_h)) n++;
+    const uint64_t cut = n ? tc::ps4_tiled_size(tw, th, n, fi->second.second, comp) : 0;
+    if (cut >= x.size) return std::nullopt;
+    DictTexture out;
+    out.path = x.path;
+    out.texels.resize(x.size - cut);
+    std::ifstream in(x.file, std::ios::binary);
+    in.seekg(std::streamoff(x.off + cut));
+    in.read(reinterpret_cast<char *>(out.texels.data()), std::streamsize(out.texels.size()));
+    if (!in) return std::nullopt;
+    auto put = [&](size_t o, uint32_t v) { std::memcpy(&d[o], &v, 4); };
+    put(0x24, mips - n);
+    put(0x28, std::max(1u, tw >> n));
+    put(0x2c, std::max(1u, th >> n));
+    out.desc = std::move(d);
+    return out;
+}
+
+}  // namespace
+
+bool dict_texture(const fs::path &pak_dir, const std::string &path, uint32_t max_w, uint32_t max_h, Bytes &desc, Bytes &texels) {
+    if (desc.size() < 0x30) return false;
+    const Dicts &D = texture_dicts(pak_dir.parent_path().parent_path() / "texturedict1" / "ps4");
+    auto it = D.by_path.find(path);
+    if (it == D.by_path.end() || rd32le(&it->second.desc[0x1c]) != rd32le(&desc[0x1c])) return false;   // same format
+    auto t = dict_read(it->second, max_w, max_h);
+    if (!t || uint64_t(rd32le(&t->desc[0x28])) * rd32le(&t->desc[0x2c]) <= uint64_t(rd32le(&desc[0x28])) * rd32le(&desc[0x2c]))
+        return false;   // not larger than the resident copy
+    desc = std::move(t->desc);
+    texels = std::move(t->texels);
+    return true;
+}
+
+std::optional<DictTexture> dict_texture_short(const fs::path &dict_dir, const std::string &shrt, uint32_t max_w, uint32_t max_h) {
+    const Dicts &D = texture_dicts(dict_dir);
+    auto it = D.by_short.find(shrt);
+    if (it == D.by_short.end()) return std::nullopt;
+    return dict_read(*it->second, max_w, max_h);
+}
+
+namespace {
+
 
 std::optional<MatRec> material(XPak &x, const std::string &key) {
     const Pak &q = *x.q;

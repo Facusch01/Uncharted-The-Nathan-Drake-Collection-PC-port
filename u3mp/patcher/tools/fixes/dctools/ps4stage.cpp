@@ -929,8 +929,15 @@ Bytes convert_once(const Pak &p, const std::string &stage, const Plan &plan, con
         const RTex *t = R.get(full + ".ndb");
         if (!t) t = R.get(full);
         if (t) {
-            Bytes dsc, txl;
-            cap_raw_texture(t->desc, t->texels, dsc, txl);
+            Bytes dsc, txl, d0 = t->desc, t0 = t->texels;
+            // a retail level pak's copy of a texture the game streams is only its small resident copy (64x64): the PS3
+            // level has the texture at full size, so the full size from the PS4 texture dictionary (up to the PS3 size),
+            // else the PS3 texture itself. Desert drew 139 of its 143 textures from 64x64 copies.
+            if (const PakTexture *t3 = d0.size() >= 0x30 ? ps3tex_get(t->shrt) : nullptr;
+                t3 && t3->type != 2 && uint64_t(t3->width) * t3->height > uint64_t(rd32le(d0, 0x28)) * rd32le(d0, 0x2c) &&
+                !dict_texture(opt.pak_dir, t->path, t3->width, t3->height, d0, t0))
+                if (TexP e = convert_ps3_texture(*t3, t->path, t->shrt, 3, std::nullopt)) return e;
+            cap_raw_texture(d0, t0, dsc, txl);
             std::optional<Bytes> g;
             if (auto gi = R.gtex.find(full); gi != R.gtex.end() && !gi->second.empty()) g = gi->second;
             else g = t->gtex;
