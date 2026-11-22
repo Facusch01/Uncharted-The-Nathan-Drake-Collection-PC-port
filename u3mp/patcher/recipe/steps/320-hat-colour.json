@@ -31,6 +31,8 @@
    "u3fix.exe",
    "install-am",
    "hats",
+   "--job",
+   "{{JOB}}",
    "--project",
    "{{PROJECT}}",
    "--only",
@@ -53,5 +55,5 @@
   "dctools"
  ],
  "recipe_version_updated": "1.10.1",
- "recipe_version_changed": "1.29.0"
+ "recipe_version_changed": "1.29.1"
 }

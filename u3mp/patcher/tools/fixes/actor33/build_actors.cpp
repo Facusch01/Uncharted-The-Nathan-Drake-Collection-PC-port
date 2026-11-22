@@ -503,6 +503,32 @@ int actors(const std::vector<std::string> &argv) {
 // wins), template, texture cap, sha256, [options: no-overlay-filter]. Output: <project>/scratch/actor-materials/out,
 // hat-colour/out or airport-igc2/out (<name>.pak), which the steps' apply scripts install. A pak already at its recorded
 // hash is not rebuilt. am rows with the source 'retail' are the template renamed. Exit 1 if any pak differs.
+namespace {
+// jobs-am.tsv / jobs-hats.tsv / jobs-igc2.tsv of the actor33 job: one row per rebuilt pak, in file order
+struct AmRow {
+    std::string name, src, tmpl, cap, sha, opts;
+};
+std::vector<AmRow> am_rows(const std::string &job, const std::string &kind) {
+    std::vector<AmRow> rows;
+    const std::string t = text_file(upath(job + "/jobs-" + kind + ".tsv"));
+    size_t b = 0;
+    for (size_t k = 0; k <= t.size(); k++) {
+        if (k < t.size() && t[k] != '\n') continue;
+        std::string l = t.substr(b, k - b);
+        b = k + 1;
+        if (!l.empty() && l.back() == '\r') l.pop_back();
+        if (py_split(l).empty() || l[0] == '#') continue;
+        std::vector<std::string> c;
+        size_t s = 0;
+        for (size_t j = 0; j <= l.size(); j++)
+            if (j == l.size() || l[j] == '\t') { c.push_back(l.substr(s, j - s)); s = j + 1; }
+        if (c.size() < 5) throw Stop("jobs-" + kind + ".tsv: short row " + l);
+        rows.push_back({c[0], c[1], c[2], c[3], c[4], c.size() > 5 ? c[5] : ""});
+    }
+    return rows;
+}
+}  // namespace
+
 int rebuild_am(const std::vector<std::string> &argv) {
     if (argv.empty() || (argv[0] != "am" && argv[0] != "hats" && argv[0] != "igc2")) throw Stop("usage: u3fix rebuild-am am|hats|igc2 --project P ...");
     const std::string kind = argv[0];
@@ -520,28 +546,10 @@ int rebuild_am(const std::vector<std::string> &argv) {
                 b = k + 1;
             }
     }
-    struct Row {
-        std::string name, src, tmpl, cap, sha, opts;
-    };
+    using Row = AmRow;
     std::vector<Row> rows;
-    {
-        const std::string t = text_file(upath(a_here + "/jobs-" + kind + ".tsv"));
-        size_t b = 0;
-        for (size_t k = 0; k <= t.size(); k++) {
-            if (k < t.size() && t[k] != '\n') continue;
-            std::string l = t.substr(b, k - b);
-            b = k + 1;
-            if (!l.empty() && l.back() == '\r') l.pop_back();
-            if (py_split(l).empty() || l[0] == '#') continue;
-            std::vector<std::string> c;
-            size_t s = 0;
-            for (size_t j = 0; j <= l.size(); j++)
-                if (j == l.size() || l[j] == '\t') { c.push_back(l.substr(s, j - s)); s = j + 1; }
-            if (c.size() < 5) throw Stop("jobs-" + kind + ".tsv: short row " + l);
-            if (!only.empty() && !only.count(c[0])) continue;
-            rows.push_back({c[0], c[1], c[2], c[3], c[4], c.size() > 5 ? c[5] : ""});
-        }
-    }
+    for (const AmRow &r : am_rows(a_here, kind))
+        if (only.empty() || only.count(r.name)) rows.push_back(r);
     // (the Yeti mask's teeth are no longer rebuilt here: their normals / tangents were never lost on PS3, the decoder
     // stopped at vertex attribute 0x15 before them; since 2026-11-13 it reads them)
     auto newest = [](const std::string &name) {   // the newest PS3 archive with the pak
@@ -631,15 +639,18 @@ int rebuild_am(const std::vector<std::string> &argv) {
 
 // Install the rebuilt paks of rebuild-am into overlay-r3 (replaces actor-materials/apply_actor_materials.py,
 // hat-colour/apply_hat_colour.py and airport-igc2/apply_igc2.py; same messages and backups).
-//   u3fix install-am am|hats|igc2 --project P [--work DIR] [--only a,b (hats)] [--apply | --restore]
-// am / hats: the paks of <scratch>/<job>/manifest.json (out/ must hold them at those hashes); the first apply backs up
+//   u3fix install-am am|hats|igc2 --project P --job J [--work DIR] [--only a,b (hats)] [--apply | --restore]
+// The paks and hashes are the rows of J/jobs-<kind>.tsv, the table rebuild-am checks its builds against, so a converter
+// change rehashes one table only. am / hats: out/ must hold every row's pak at its hash; the first apply backs up
 // the overlay-r3 copies to work/backup-actor-materials or backup-hat-colour and records in state.json whether each
 // existed; --restore puts them back and removes the ones that did not. igc2: mp-hero-flynn-coop.pak, backed up once to
 // work/backup-igc2. Without --apply / --restore: a dry run.
 int install_am(const std::vector<std::string> &argv) {
     if (argv.empty() || (argv[0] != "am" && argv[0] != "hats" && argv[0] != "igc2")) throw Stop("usage: u3fix install-am am|hats|igc2 --project P ...");
     const std::string kind = argv[0];
-    const Args a(std::vector<std::string>(argv.begin() + 1, argv.end()), {"--apply", "--restore"}, {"--project", "--work", "--only"});
+    const Args a(std::vector<std::string>(argv.begin() + 1, argv.end()), {"--apply", "--restore"}, {"--project", "--job", "--work", "--only"});
+    std::vector<std::pair<std::string, std::string>> man;   // pak -> the hash rebuild-am checked it against
+    for (const AmRow &r : am_rows(a.need("--job"), kind)) man.push_back({r.name + ".pak", r.sha});
     const std::string folder = kind == "am" ? "actor-materials" : kind == "hats" ? "hat-colour" : "airport-igc2";
     const fs::path here = upath(a.need("--project")) / "scratch" / upath(folder), src = here / "out";
     const fs::path work = a.val.count("--work") ? upath(a.get("--work", "")) : upath(a.need("--project")) / "work";
@@ -656,8 +667,7 @@ int install_am(const std::vector<std::string> &argv) {
     };
     if (kind == "igc2") {
         const fs::path bak = work / "backup-igc2";
-        const std::vector<std::pair<std::string, std::string>> files = {{"mp-hero-flynn-coop.pak", "1225c5bacb9e92d3c78ddfd9de4d7930a88a8efeb181f8d1ac264a8160008998"}};
-        for (const auto &[n, want] : files) {
+        for (const auto &[n, want] : man) {   // mp-hero-flynn-coop.pak
             const fs::path s = src / n, d = dst / n, b = bak / n;
             if (a.has("--restore")) {
                 if (!fs::exists(b)) return fail("no backup " + win_path(utf8(b)));
@@ -685,8 +695,6 @@ int install_am(const std::vector<std::string> &argv) {
     if (a.has("--apply") && a.has("--restore")) return fail("use --apply or --restore, not both");
     const fs::path bak = work / (kind == "am" ? "backup-actor-materials" : "backup-hat-colour"), state = bak / "state.json";
     if (!fs::is_directory(dst)) return fail("missing " + win_path(utf8(dst)));
-    std::vector<std::pair<std::string, std::string>> man;
-    for (const auto &[k, v] : read_json(here / "manifest.json").fields) man.push_back({k, v.s});
     if (kind == "hats" && a.val.count("--only")) {
         std::set<std::string> only;
         const std::string on = a.get("--only", "");
@@ -742,9 +750,9 @@ int install_am(const std::vector<std::string> &argv) {
     };
     for (const auto &[n, h] : man) {
         const fs::path s = src / n, d = dst / n, b = bak / n;
-        if (!fs::exists(s)) return fail("out/ pak missing or changed since manifest: " + n);
+        if (!fs::exists(s)) return fail("out/ pak missing or not at its jobs-" + kind + ".tsv hash: " + n);
         const Bytes sb = read_file(s);
-        if (sha256_hex(sb) != h) return fail("out/ pak missing or changed since manifest: " + n);
+        if (sha256_hex(sb) != h) return fail("out/ pak missing or not at its jobs-" + kind + ".tsv hash: " + n);
         const bool has_old = fs::exists(d);
         const Bytes old = has_old ? read_file(d) : Bytes();
         const std::string cur = has_old ? sha256_hex(old).substr(0, 16) : kind == "am" ? "not in overlay-r3" : "not in overlay-r3 (overlay-port copy is used now)";
