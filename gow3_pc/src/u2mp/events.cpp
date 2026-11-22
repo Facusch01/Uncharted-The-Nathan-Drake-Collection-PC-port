@@ -9,9 +9,12 @@
 // Reimplemented from the behaviour description u2mp/docs/spec/events.md.
 #include "events.h"
 
+#include <atomic>
 #include <climits>
 #include <cmath>
 #include <cstring>
+#include <initializer_list>
+#include <mutex>
 
 // The wire values must be bit-exact with the other peers: every float operation is rounded on
 // its own, never fused.
@@ -253,6 +256,12 @@ U2MP_GUEST void read_kill_entity(void *ev, BitStream *bs) {
     finish_read(in, ev, 76, 0x10);
 }
 
+void apply_npc_damage(void *ev);
+
+U2MP_GUEST void apply_npc_deal_damage(void *ev, void * /*connection*/) {
+    apply_npc_damage(ev);
+}
+
 // 44 NetEventNpcDealDamage.
 U2MP_GUEST void read_npc_deal_damage(void *ev, BitStream *bs) {
     Reader in{*bs};
@@ -484,6 +493,189 @@ U2MP_GUEST void write_turret_snapshot(void *ev, BitStream *bs) {
     out.u32(ev, 0x0c); out.u32(ev, 0x10); out.u32(ev, 0x14); out.time(ev, 0x18); out.u32(ev, 0x1c, 12);
 }
 
+
+// ---------------------------------------------------------------------------------------------
+// NPC ownership: the host names and sends every NPC; a joiner binds the sender's name to its own
+// copy of that NPC and does not send its own despawns.
+
+constexpr uint64_t kMatchSession = 0x1065b08;
+constexpr uint64_t kNpcSendSpawn = 0x6133d0;
+constexpr uint64_t kNpcSendDespawn = 0x6135a0;
+constexpr uint64_t kNpcKill = 0x60eb90;
+constexpr uint64_t kWeaponTable = 0xdef290;
+constexpr size_t kMaxNpcs = 256;
+
+struct LocalNpc {
+    uint64_t npc;
+    uint32_t id;
+    uint32_t key;
+    uint32_t f0;
+    uint32_t f40;
+    uint32_t name;
+    uint8_t state;
+};
+
+LocalNpc g_local[kMaxNpcs];
+unsigned g_local_next;
+std::mutex g_local_lock;
+std::atomic<int> g_bound{0}, g_failed{0}, g_local_logged{0};
+
+bool npc_host() {
+    const uint64_t session = uint64_t(uintptr_t(image.base)) + kMatchSession;
+    const uint64_t context = load<uint64_t>(reinterpret_cast<const void *>(session), 0x10);
+    if (!context) return true;
+    return load<uint32_t>(reinterpret_cast<const void *>(session), 0xb00) ==
+           load<uint32_t>(reinterpret_cast<const void *>(session), 0xb04);
+}
+
+bool npc_alive(uint64_t npc, uint32_t id) {
+    return npc && id && load<uint32_t>(reinterpret_cast<const void *>(npc), 0x44) == id;
+}
+
+void record_local_npc(uint64_t npc, uint32_t key) {
+    if (!npc) return;
+    const uint32_t id = load<uint32_t>(reinterpret_cast<const void *>(npc), 0x44);
+    if (!id) return;
+    std::lock_guard<std::mutex> lock(g_local_lock);
+    const unsigned i = g_local_next++ % kMaxNpcs;
+    g_local[i] = {npc, id, key,
+                  load<uint32_t>(reinterpret_cast<const void *>(npc), 0x2568),
+                  load<uint32_t>(reinterpret_cast<const void *>(npc), 0x25a8),
+                  load<uint32_t>(reinterpret_cast<const void *>(npc), 0x68), 1};
+    if (g_local_logged.fetch_add(1) < 8) log("npc sync: local %08x key %08x", id, key);
+}
+
+bool bind_local_npc(uint64_t npc, uint32_t id, uint32_t name) {
+    if (!npc_alive(npc, id)) return false;
+    store<uint32_t>(reinterpret_cast<void *>(npc), 0x68, name);
+    const uint32_t x = load<uint32_t>(reinterpret_cast<const void *>(npc), 0x3708);
+    const uint8_t ok = guest<uint8_t(U2MP_GUEST *)(void *, void *, uint32_t)>(kAddNetNpcTracker)(
+        image.base + kNetGameManager, reinterpret_cast<void *>(npc), x);
+    return ok != 0;
+}
+
+bool bind_remote_npc(uint32_t name, uint32_t key, uint32_t f0, uint32_t f40) {
+    if (npc_host()) return true;
+    uint64_t npc = 0;
+    uint32_t id = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_local_lock);
+        for (const LocalNpc &n : g_local)
+            if (n.state == 2 && n.name == name) return true;
+        for (unsigned k = 0; k < kMaxNpcs; ++k) {
+            LocalNpc &n = g_local[(g_local_next + k) % kMaxNpcs];
+            if (n.state != 1 || n.key != key) continue;
+            if (!key && (n.f0 != f0 || n.f40 != f40)) continue;
+            if (!npc_alive(n.npc, n.id)) {
+                n.state = 0;
+                continue;
+            }
+            npc = n.npc;
+            id = n.id;
+            n.state = 2;
+            n.name = name;
+            break;
+        }
+    }
+    if (!npc) {
+        if (g_failed.fetch_add(1) < 8) log("npc sync: no local npc for %08x, spawning it", name);
+        return false;
+    }
+    if (!bind_local_npc(npc, id, name)) {
+        g_failed.fetch_add(1);
+        return true;
+    }
+    if (g_bound.fetch_add(1) < 8) log("npc sync: bound %08x to a local npc", name);
+    return true;
+}
+
+using NpcSendSpawnFn = void(U2MP_GUEST *)(void *, void *, void *);
+using NpcSendDespawnFn = void(U2MP_GUEST *)(uint32_t);
+
+U2MP_GUEST void local_npc_init(void *info, void *params, void *npc) {
+    guest<NpcSendSpawnFn>(kNpcSendSpawn)(info, params, npc);
+    if (npc_host() || !npc) return;
+    const uint64_t spawner = info ? load<uint64_t>(info, 0x40) : 0;
+    const uint32_t key = spawner ? load<uint32_t>(reinterpret_cast<const void *>(spawner), 0x28) : 0;
+    record_local_npc(uint64_t(uintptr_t(npc)), key);
+}
+
+U2MP_GUEST void local_npc_despawn(uint32_t name) {
+    if (npc_host()) {
+        guest<NpcSendDespawnFn>(kNpcSendDespawn)(name);
+        return;
+    }
+    std::lock_guard<std::mutex> lock(g_local_lock);
+    for (LocalNpc &n : g_local)
+        if (n.state && n.npc && load<uint32_t>(reinterpret_cast<const void *>(n.npc), 0x68) == name) n.state = 0;
+}
+
+uint64_t npc_tracker(uint32_t name) {
+    const uint64_t ngm = uint64_t(uintptr_t(image.base)) + kNetGameManager;
+    const uint64_t buckets = load<uint64_t>(reinterpret_cast<const void *>(ngm), 0x1ba0);
+    const int32_t count = load<int32_t>(reinterpret_cast<const void *>(ngm), 0x1bdc);
+    if (!buckets || count <= 0) return 0;
+    uint32_t h = 0x811c9dc5u;
+    for (int i = 0; i < 4; ++i) h = (h ^ ((name >> (8 * i)) & 0xffu)) * 0x1000193u;
+    uint64_t node = load<uint64_t>(reinterpret_cast<const void *>(buckets + 8 * (h % uint32_t(count))), 0);
+    const uint64_t end = load<uint64_t>(reinterpret_cast<const void *>(buckets + 8 * uint64_t(count)), 0);
+    for (int guard = 0; node && node != end && guard < 4096; ++guard) {
+        if (load<uint32_t>(reinterpret_cast<const void *>(node), 0x10) == name) return node + 0x18;
+        node = load<uint64_t>(reinterpret_cast<const void *>(node), 0);
+    }
+    return 0;
+}
+
+uint64_t player_process(int32_t id) {
+    const uint64_t ngm = uint64_t(uintptr_t(image.base)) + kNetGameManager;
+    for (int k = 0; k < 10; ++k) {
+        const uint64_t slot = ngm + 0x10 + uint64_t(k) * 0x2c0;
+        if (!load<uint8_t>(reinterpret_cast<const void *>(slot), 0x20) ||
+            load<int32_t>(reinterpret_cast<const void *>(slot), 0x120) != id)
+            continue;
+        const uint64_t handle = load<uint64_t>(reinterpret_cast<const void *>(slot), 0x10);
+        const uint32_t pid = load<uint32_t>(reinterpret_cast<const void *>(slot), 0x18);
+        if (!handle || !pid) return 0;
+        const uint64_t process = load<uint64_t>(reinterpret_cast<const void *>(handle), 0);
+        if (!process || load<uint32_t>(reinterpret_cast<const void *>(process), 0x44) != pid) return 0;
+        return process;
+    }
+    return 0;
+}
+
+void apply_npc_damage(void *ev) {
+    const int32_t id = load<int32_t>(ev, 0x0c);
+    const uint32_t name = load<uint32_t>(ev, 0x10);
+    const int32_t damage = load<int32_t>(ev, 0x14);
+    const float at = load<float>(ev, 0x18);
+    const uint32_t index = load<uint32_t>(ev, 0x1c);
+    const uint64_t player = player_process(id);
+    if (!player) return;
+    const uint64_t tracker = npc_tracker(name);
+    if (!tracker) return;
+    const uint64_t handle = load<uint64_t>(reinterpret_cast<const void *>(tracker), 0);
+    const uint32_t pid = load<uint32_t>(reinterpret_cast<const void *>(tracker), 8);
+    const uint64_t npc = handle ? load<uint64_t>(reinterpret_cast<const void *>(handle), 0) : 0;
+    if (!npc || !pid || load<uint32_t>(reinterpret_cast<const void *>(npc), 0x44) != pid) return;
+    const uint64_t vt = load<uint64_t>(reinterpret_cast<const void *>(npc), 0);
+    const uint64_t is_dead = vt ? load<uint64_t>(reinterpret_cast<const void *>(vt), 0x250) : 0;
+    const uint64_t take = vt ? load<uint64_t>(reinterpret_cast<const void *>(vt), 0x370) : 0;
+    if (!is_dead || !take) return;
+    using IsDeadFn = uint8_t(U2MP_GUEST *)(uint64_t);
+    using DamageFn = void(U2MP_GUEST *)(uint64_t, int32_t);
+    if (reinterpret_cast<IsDeadFn>(is_dead)(npc)) return;
+    reinterpret_cast<DamageFn>(take)(npc, damage);
+    if (!reinterpret_cast<IsDeadFn>(is_dead)(npc) || !npc_host()) return;
+    uint32_t weapon = 0;
+    if (index < 46)
+        weapon = load<uint32_t>(reinterpret_cast<const void *>(uintptr_t(image.base) + kWeaponTable + 4 * uint64_t(index)), 0);
+    using KillFn = void(U2MP_GUEST *)(uint32_t, uint64_t, uint64_t, uint32_t *, uint32_t, uint32_t, uint32_t);
+    uint32_t time = at == at && at > 0.0f && at < 1.0e7f ? uint32_t(int32_t(at * 300.0f)) : 0;
+    guest<KillFn>(kNpcKill)(weapon, player, npc, &time, 0, 0, 0);
+    uint8_t flags = load<uint8_t>(reinterpret_cast<const void *>(npc), 0x262a);
+    store<uint8_t>(reinterpret_cast<void *>(npc), 0x262a, uint8_t(flags | 2));
+}
+
 // ---------------------------------------------------------------------------------------------
 // 37 NetEventNpcSpawn Apply: spawn the npc the sender described and register it for the net.
 
@@ -492,6 +684,7 @@ U2MP_GUEST void apply_npc_spawn(void *ev, void * /*connection*/) {
     const uint32_t spawner_id = load<uint32_t>(ev, 0x10);
     const uint32_t second_id = load<uint32_t>(ev, 0x14);
     const uint32_t tag = load<uint32_t>(ev, 0x18);
+    if (bind_remote_npc(npc_id, spawner_id, second_id, tag)) return;
     void *const manager = image.base + kSpawnerManager;
     const auto lookup_spawner = guest<uint8_t *(U2MP_GUEST *)(void *, uint32_t)>(kLookupSpawner);
 
@@ -546,7 +739,7 @@ U2MP_GUEST void apply_npc_spawn(void *ev, void * /*connection*/) {
 const Port kPorts[] = {
     {37, "NetEventNpcSpawn", 0x1040f30, 0x20, 0x62f240, 0x62f230, 0x62f220, read_npc_spawn, write_npc_spawn, apply_npc_spawn},
     {38, "NetEventNpcKill", 0x1040760, 0x10, 0x622080, 0x622070, 0, read_npc_kill, write_one_u32, nullptr},
-    {44, "NetEventNpcDealDamage", 0x10405d0, 0x20, 0x61fe00, 0, 0, read_npc_deal_damage, write_npc_deal_damage, nullptr},
+    {44, "NetEventNpcDealDamage", 0x10405d0, 0x20, 0x61fe00, 0, 0, read_npc_deal_damage, write_npc_deal_damage, apply_npc_deal_damage},
     {47, "NetEventEvent", 0x1040580, 0x100, 0x61fa60, 0x61fa50, 0, read_event, write_event, nullptr},
     {49, "NetEventTerritoryOwn", 0x1040440, 0x50, 0x61f030, 0x61f020, 0, read_territory_own, write_territory_own, nullptr},
     {51, "NetEventTerritorySpawn", 0x10403a0, 0x18, 0x61e890, 0x61e880, 0, read_territory_spawn, write_territory_spawn, nullptr},
@@ -561,9 +754,265 @@ const Port kPorts[] = {
 };
 const size_t kPortCount = sizeof kPorts / sizeof kPorts[0];
 
+
+
+// Type 13 AttackProjectile: a hit the shooter decided. Log the first few so a missing hit can be
+// told apart from a hit that arrives with zero damage.
+SerializeFn attack_read_game, attack_write_game;
+void(U2MP_GUEST *attack_apply_game)(void *, void *);
+unsigned attack_logs;
+
+void log_attack(const char *when, const void *ev) {
+    if (++attack_logs > 12) return;
+    log("net attack %s: flags %08x attacker %u target %u damage %d", when, load<uint32_t>(ev, 0x0c),
+        load<uint32_t>(ev, 0x10), load<uint32_t>(ev, 0x14), load<int32_t>(ev, 0x1c));
+}
+U2MP_GUEST void read_attack(void *ev, BitStream *bs) {
+    attack_read_game(ev, bs);
+    log_attack("read", ev);
+}
+U2MP_GUEST void write_attack(void *ev, BitStream *bs) {
+    log_attack("write", ev);
+    attack_write_game(ev, bs);
+}
+U2MP_GUEST void apply_attack(void *ev, void *conn) {
+    log_attack("apply", ev);
+    attack_apply_game(ev, conn);
+}
+
+bool install_attack_log() {
+    constexpr uint64_t vtable = 0x1040b70;
+    struct Slot { unsigned slot; uint64_t game; void *fn; };
+    const Slot slots[] = {
+        {2, 0x628be0, reinterpret_cast<void *>(&read_attack)},
+        {3, 0x628670, reinterpret_cast<void *>(&write_attack)},
+        {4, 0x627da0, reinterpret_cast<void *>(&apply_attack)},
+    };
+    for (const Slot &s : slots)
+        if (*image.at<uint64_t>(vtable + 8 * s.slot) != uint64_t(uintptr_t(image.base + s.game))) return false;
+    attack_read_game = reinterpret_cast<SerializeFn>(*image.at<uint64_t>(vtable + 16));
+    attack_write_game = reinterpret_cast<SerializeFn>(*image.at<uint64_t>(vtable + 24));
+    attack_apply_game = reinterpret_cast<void(U2MP_GUEST *)(void *, void *)>(*image.at<uint64_t>(vtable + 32));
+    *image.at<uint64_t>(vtable + 16) = uint64_t(uintptr_t(&read_attack));
+    *image.at<uint64_t>(vtable + 24) = uint64_t(uintptr_t(&write_attack));
+    *image.at<uint64_t>(vtable + 32) = uint64_t(uintptr_t(&apply_attack));
+    log("net attack: AttackProjectile Read/Write/Apply wrapped for logging");
+    return true;
+}
+
+// Carry-object pickup/drop (types 33 and 34): log the first few so a missing state change can be
+// seen when a propane tank is picked up or dropped.
+SerializeFn carry33_read_game, carry33_write_game, carry34_read_game, carry34_write_game;
+void(U2MP_GUEST *carry33_apply_game)(void *, void *);
+void(U2MP_GUEST *carry34_apply_game)(void *, void *);
+unsigned carry_logs;
+
+void log_carry(const char *name, const char *when, const void *ev) {
+    if (++carry_logs > 16) return;
+    log("net carry %s %s: %08x %08x %08x", name, when, load<uint32_t>(ev, 0x0c),
+        load<uint32_t>(ev, 0x10), load<uint32_t>(ev, 0x14));
+}
+U2MP_GUEST void read_carry33(void *ev, BitStream *bs) { carry33_read_game(ev, bs); log_carry("33", "read", ev); }
+U2MP_GUEST void write_carry33(void *ev, BitStream *bs) { log_carry("33", "write", ev); carry33_write_game(ev, bs); }
+U2MP_GUEST void apply_carry33(void *ev, void *c) { log_carry("33", "apply", ev); carry33_apply_game(ev, c); }
+U2MP_GUEST void read_carry34(void *ev, BitStream *bs) { carry34_read_game(ev, bs); log_carry("34", "read", ev); }
+U2MP_GUEST void write_carry34(void *ev, BitStream *bs) { log_carry("34", "write", ev); carry34_write_game(ev, bs); }
+U2MP_GUEST void apply_carry34(void *ev, void *c) { log_carry("34", "apply", ev); carry34_apply_game(ev, c); }
+
+bool install_carry_log() {
+    struct Set {
+        uint64_t vtable;
+        uint64_t read, write, apply;
+        SerializeFn *read_orig, *write_orig;
+        void(U2MP_GUEST **apply_orig)(void *, void *);
+        SerializeFn read_fn, write_fn;
+        void(U2MP_GUEST *apply_fn)(void *, void *);
+    };
+    Set sets[] = {
+        {0x1040800, 0x622bb0, 0x622940, 0x622760, &carry33_read_game, &carry33_write_game, &carry33_apply_game,
+         &read_carry33, &write_carry33, &apply_carry33},
+        {0x1040fd0, 0x62fc10, 0x62fb50, 0x62f9c0, &carry34_read_game, &carry34_write_game, &carry34_apply_game,
+         &read_carry34, &write_carry34, &apply_carry34},
+    };
+    int done = 0;
+    for (Set &set : sets) {
+        if (*image.at<uint64_t>(set.vtable + 16) != uint64_t(uintptr_t(image.base + set.read)) ||
+            *image.at<uint64_t>(set.vtable + 24) != uint64_t(uintptr_t(image.base + set.write)) ||
+            *image.at<uint64_t>(set.vtable + 32) != uint64_t(uintptr_t(image.base + set.apply)))
+            continue;
+        *set.read_orig = reinterpret_cast<SerializeFn>(*image.at<uint64_t>(set.vtable + 16));
+        *set.write_orig = reinterpret_cast<SerializeFn>(*image.at<uint64_t>(set.vtable + 24));
+        *set.apply_orig = reinterpret_cast<void(U2MP_GUEST *)(void *, void *)>(*image.at<uint64_t>(set.vtable + 32));
+        *image.at<uint64_t>(set.vtable + 16) = uint64_t(uintptr_t(set.read_fn));
+        *image.at<uint64_t>(set.vtable + 24) = uint64_t(uintptr_t(set.write_fn));
+        *image.at<uint64_t>(set.vtable + 32) = uint64_t(uintptr_t(set.apply_fn));
+        ++done;
+    }
+    if (done) log("net carry: %d carry-object event sets wrapped for logging", done);
+    return done > 0;
+}
+// ---------------------------------------------------------------------------------------------
+// 8 NetEventEmitGrenade and 9 NetEventGrenadeExplode keep fields out of their own codecs although
+// their Execute bodies use them: type 8's +0x40 projectile settings and type 9's +0x14 attack,
+// +0x18 explosion settings and +0x170 float. Append them after the game's fields, as 32-bit words.
+
+using Serialize = void(U2MP_GUEST *)(void *, BitStream *);
+Serialize emit_grenade_read_game, emit_grenade_write_game;
+Serialize grenade_explode_read_game, grenade_explode_write_game;
+
+// The extra words must not push the cursor past maxBits: write_bits advances even when the
+// field does not fit, while read_bits leaves the cursor alone. Skipping the write here keeps
+// both sides on the same bit offset.
+bool has_room(const BitStream &bs, unsigned bits) {
+    return bs.bits <= bs.max_bits && bits <= bs.max_bits - bs.bits;
+}
+void append_u32(BitStream &bs, uint32_t v) {
+    if (!has_room(bs, 32)) return;
+    write_bits(bs, v, 32);
+}
+
+U2MP_GUEST void read_emit_grenade(void *ev, BitStream *bs) {
+    emit_grenade_read_game(ev, bs);
+    uint32_t v = 0;
+    if (read_bits(*bs, v, 32)) store<uint32_t>(ev, 0x40, v);
+}
+U2MP_GUEST void write_emit_grenade(void *ev, BitStream *bs) {
+    emit_grenade_write_game(ev, bs);
+    append_u32(*bs, load<uint32_t>(ev, 0x40));
+}
+U2MP_GUEST void read_grenade_explode(void *ev, BitStream *bs) {
+    grenade_explode_read_game(ev, bs);
+    uint32_t v = 0;
+    if (read_bits(*bs, v, 32)) store<uint32_t>(ev, 0x14, v);
+    if (read_bits(*bs, v, 32)) store<uint32_t>(ev, 0x18, v);
+    if (read_bits(*bs, v, 32)) store<uint32_t>(ev, 0x170, v);
+}
+U2MP_GUEST void write_grenade_explode(void *ev, BitStream *bs) {
+    grenade_explode_write_game(ev, bs);
+    append_u32(*bs, load<uint32_t>(ev, 0x14));
+    append_u32(*bs, load<uint32_t>(ev, 0x18));
+    append_u32(*bs, load<uint32_t>(ev, 0x170));
+}
+
+bool install_extra_fields() {
+    struct Extra {
+        uint64_t vtable;
+        unsigned slot;
+        uint64_t game;
+        Serialize *orig;
+        Serialize fn;
+        const char *what;
+    };
+    const Extra extras[] = {
+        {0x1040c60, 2, 0x62b650, &emit_grenade_read_game, &read_emit_grenade, "EmitGrenade +0x40 read"},
+        {0x1040c60, 3, 0x62b250, &emit_grenade_write_game, &write_emit_grenade, "EmitGrenade +0x40 write"},
+        {0x1040c10, 2, 0x62a780, &grenade_explode_read_game, &read_grenade_explode, "GrenadeExplode +0x14/+0x18/+0x170 read"},
+        {0x1040c10, 3, 0x62a020, &grenade_explode_write_game, &write_grenade_explode, "GrenadeExplode +0x14/+0x18/+0x170 write"},
+    };
+    int done = 0;
+    for (const Extra &e : extras) {
+        if (e.vtable + 8 * e.slot + 8 > image.size) continue;
+        uint64_t *entry = image.at<uint64_t>(e.vtable + 8 * e.slot);
+        if (*entry != uint64_t(uintptr_t(image.base + e.game))) {
+            log("net events: %s: expected 0x%llx, left alone", e.what,
+                static_cast<unsigned long long>(e.game));
+            continue;
+        }
+        *e.orig = reinterpret_cast<Serialize>(*entry);
+        *entry = uint64_t(uintptr_t(e.fn));
+        log("net events: %s", e.what);
+        ++done;
+    }
+    return done > 0;
+}
+// ---------------------------------------------------------------------------------------------
+// Message 0x2e's Read (0x62de90) takes its byte buffer from the thread's current allocator scope.
+// At the net pump that scope can hold a null entry, and the Read dereferences it at 0x62dfc2 before
+// any fallback. Guard that lookup and, when it has nothing, take the buffer from the Network heap
+// (context 0x14) so the event's destructor can free it with the game's own free.
+static int message_fallbacks;
+
+U2MP_GUEST uint64_t message_buffer(uint64_t size) {
+    static const uint32_t context[4] = {0x14};
+    using Alloc = uint64_t(U2MP_GUEST *)(uint64_t, const uint32_t *, uint64_t);
+    const uint64_t p = guest<Alloc>(0xb332a0)(size, context, 0x10);
+    if (++message_fallbacks <= 4) {
+        log("net Message: 0x62dfc2 allocator entry is null; its %u bytes from the Network heap (%s)",
+            static_cast<unsigned>(uint32_t(size)), p ? "taken" : "NONE");
+    }
+    return p;
+}
+
+static bool install_message_read() {
+    constexpr uint64_t kEntry = 0x62dfc2, kResume = 0x62dfdf;
+    static const unsigned char want[5] = {0x48, 0x8b, 0x07, 0x48, 0x8d};   // mov rax,[rdi]; lea rcx,...
+    if (!image.executable(kEntry, 5)) return false;
+    if (!image.matches(kEntry, want, sizeof want)) return image.base[kEntry] == 0xe9;
+    unsigned char *s = near_stub(128);
+    if (!s) return false;
+    const uint64_t stub = uint64_t(uintptr_t(s));
+    size_t n = 0;
+    auto bytes = [&](std::initializer_list<unsigned char> b) { for (unsigned char c : b) s[n++] = c; };
+    auto rel = [&](size_t at, uint64_t target) {
+        const int64_t d = int64_t(target) - int64_t(stub + at + 4);
+        if (d < INT32_MIN || d > INT32_MAX) return false;
+        const int32_t r = int32_t(d);
+        std::memcpy(s + at, &r, 4);
+        return true;
+    };
+    bytes({0x48, 0x85, 0xff});                     // test rdi,rdi
+    bytes({0x0f, 0x84, 0, 0, 0, 0});               // jz fallback
+    const size_t jz_rdi = n - 4;
+    bytes({0x48, 0x8b, 0x07});                     // mov rax,[rdi]
+    bytes({0x48, 0x85, 0xc0});                     // test rax,rax
+    bytes({0x0f, 0x84, 0, 0, 0, 0});               // jz fallback
+    const size_t jz_vt = n - 4;
+    bytes({0x48, 0x8d, 0x0d, 0, 0, 0, 0});         // lea rcx,[rip+...] (0xeaca4d)
+    const size_t lea_at = n - 4;
+    bytes({0xba, 0x10, 0x00, 0x00, 0x00});         // mov edx,0x10
+    bytes({0x45, 0x31, 0xc0});                     // xor r8d,r8d
+    bytes({0x89, 0xde});                           // mov esi,ebx
+    bytes({0x49, 0x89, 0xc9});                     // mov r9,rcx
+    bytes({0xff, 0x50, 0x48});                     // call [rax+0x48]
+    bytes({0x48, 0x89, 0xc6});                     // mov rsi,rax
+    bytes({0xe9, 0, 0, 0, 0});                     // jmp kResume
+    const size_t jmp_ok = n - 4;
+    const size_t fallback = n;
+    bytes({0x89, 0xdf});                           // mov edi,ebx
+    bytes({0x48, 0xb8});                           // mov rax, message_buffer
+    const uint64_t fn = uint64_t(uintptr_t(&message_buffer));
+    std::memcpy(s + n, &fn, 8); n += 8;
+    bytes({0xff, 0xd0});                           // call rax
+    bytes({0x48, 0x89, 0xc6});                     // mov rsi,rax
+    bytes({0xe9, 0, 0, 0, 0});                     // jmp kResume
+    const size_t jmp_fb = n - 4;
+    if (n > 128) return false;
+    const uint64_t back = uint64_t(uintptr_t(image.base + kResume));
+    if (!rel(lea_at, uint64_t(uintptr_t(image.base + 0xeaca4d))) || !rel(jmp_ok, back) || !rel(jmp_fb, back)) return false;
+    const size_t jz_target = fallback;
+    const int32_t jz1 = int32_t(jz_target - (jz_rdi + 4)), jz2 = int32_t(jz_target - (jz_vt + 4));
+    std::memcpy(s + jz_rdi, &jz1, 4);
+    std::memcpy(s + jz_vt, &jz2, 4);
+    const int64_t delta = int64_t(stub) - int64_t(uintptr_t(image.base + kEntry + 5));
+    if (delta < INT32_MIN || delta > INT32_MAX) return false;
+    unsigned char patch[5] = {0xe9, 0, 0, 0, 0};
+    const int32_t relative = int32_t(delta);
+    std::memcpy(patch + 1, &relative, 4);
+    std::memcpy(image.base + kEntry, patch, sizeof patch);
+    log("net Message: 0x62dfc2 read guard installed");
+    return true;
+}
+
 // ---------------------------------------------------------------------------------------------
 // Install: point every stubbed vtable slot at its port, but only where the slot still holds the
 // expected `ret` stub (anything else means the image is not what we think, so leave it alone).
+
+void install_npcsync(int &installed) {
+    if (retarget_call(0x23bb4c, kNpcSendSpawn, reinterpret_cast<void *>(&local_npc_init), "npc local init"))
+        ++installed;
+    if (retarget_call(0x240fd2, kNpcSendDespawn, reinterpret_cast<void *>(&local_npc_despawn), "npc despawn owner"))
+        ++installed;
+}
 
 void install_events(int &installed) {
     if (!image.base || kFrameClock + 4 > image.size) return;
@@ -597,6 +1046,10 @@ void install_events(int &installed) {
     }
     log("net events: %d stubbed Read/Write/Apply slots ported", ported);
     installed += ported;
+    if (install_extra_fields()) ++installed;
+    if (install_attack_log()) ++installed;
+    if (install_carry_log()) ++installed;
+    if (install_message_read()) ++installed;
 }
 
 }  // namespace u2mp::events

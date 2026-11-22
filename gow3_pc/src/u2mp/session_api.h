@@ -9,6 +9,10 @@ namespace u2mp::session {
 bool member_at(int row, uint32_t &net_id, std::string &name);
 // The member with this net id (host 1, a client in transport slot s has s + 1).
 bool member_name(uint32_t net_id, std::string &name);
+// The member's chosen hero and villain actor packages; false when the member is unknown.
+bool member_skins(uint32_t net_id, std::string &hero, std::string &villain);
+// Registers/loads an actor package by name; NULL when the game cannot create it.
+uint8_t *request_package(const char *name);
 // This PC's net id; 0 when it is not in a party.
 uint32_t local_id();
 // True when this PC leads the party (it hosts the transport).

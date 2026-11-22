@@ -1084,4 +1084,6 @@ void install_loading(int &installed) {
     installed += 1;
 }
 
+void loading_hide(const char *why) { record_request(false, why); }
+
 }  // namespace u2mp

@@ -53,6 +53,8 @@ constexpr int kMenuPageSlots = 200;
 constexpr uint64_t kNgm = 0x113b760;
 constexpr uint64_t kGameIndex = kNgm + 0x1ca0;
 constexpr uint64_t kTaskIndex = kNgm + 0x1d6c;
+constexpr uint64_t kRoundsPlayed = kNgm + 0x1d74;
+constexpr uint64_t kRoundLimit = kNgm + 0x21c0;
 constexpr uint64_t kLookupPointer = 0xa15e70;
 constexpr uint32_t kNetGames = sid("*net-games*");
 static_assert(kNetGames == 0x3b9a067du, "net-games id");
@@ -75,6 +77,7 @@ uint64_t previous_target = 0;   // absolute address the call reached before we t
 
 bool shown = false;
 uint32_t active_page = kScoreboardPage;   // the page drawn at the current result screen
+unsigned char *entered_page = nullptr;
 bool user_shown = false;   // the player pinned the board with the button
 float fade = 0.0f;
 float speed = 1.0f;
@@ -85,7 +88,6 @@ bool page_log_pending = true;
 
 float auto_left = 0.0f;   // seconds the round/match result board stays up by itself
 float end_hold = 0.0f;    // after the match ends the game leaves at once; keep the results up
-int32_t last_task = -1;
 int32_t last_end = 0;
 
 using LookupFn = const unsigned char *(U2MP_GUEST *)(uint32_t);
@@ -129,6 +131,7 @@ unsigned char *find_page() { return find_page_id(active_page); }
 void set_shown(bool on, const char *reason) {
     if (on == shown) return;
     shown = on;
+    if (!on) entered_page = nullptr;
     poke_image<uint8_t>(kTrackerShown, on ? 1 : 0);
     if (on) {
         poke_image<uint32_t>(kTrackerPage, active_page);
@@ -167,6 +170,11 @@ using RenderFn = void(U2MP_GUEST *)(void *, void *, void *);
 void draw_page(unsigned char *page, float alpha, float x, float y, float dt) {
     const unsigned char *vptr = reinterpret_cast<const unsigned char *>(peek<uint64_t>(page));
     if (!vptr || !peek<uint64_t>(vptr + 0x10) || !peek<uint64_t>(vptr + 0x18)) return;
+
+    if (entered_page != page) {
+        entered_page = page;
+        log("scoreboard: page %08x entered", peek<uint32_t>(page + 0x10));
+    }
 
     UpdateArgs args{uint64_t(uintptr_t(image.base + addr::menu_manager)), 0, dt};
     reinterpret_cast<UpdateFn>(peek<uint64_t>(vptr + 0x10))(page, &args);
@@ -225,36 +233,50 @@ U2MP_GUEST uint64_t frame_hook(uint64_t a, uint64_t b, uint64_t c) {
     const bool pressed = (buttons & ~previous_buttons & button_mask) != 0;
     previous_buttons = buttons;
 
-    // Between rounds of co-op arena the task index moves on; hold the board up for a few seconds.
-    // At the end of the match hold it until the results state takes over.
+    // The round-end flag comes up while Playing is still the state; show the board then and take
+    // it down as soon as the next round clears the flag. A final round keeps the match results up.
     if (playing) {
         const int32_t type = game_type();
-        const int32_t task = peek_image<int32_t>(kTaskIndex);
         const int32_t end = peek_image<int32_t>(kNgm + 0x1e84);
-        if (type == 8 || type == 9 || type == 12) {
-            if (last_task >= 0 && task != last_task && end == 0 && auto_left <= 0.0f) {
-                active_page = kScoreboardPage;
-                const bool round_page = find_page_id(kCoopRoundPage) != nullptr;
-                active_page = round_page ? kCoopRoundPage : kScoreboardPage;
-                auto_left = kRoundResultsSeconds;
-                log("scoreboard: round results page %08x %s", active_page, round_page ? "selected" : "missing");
-            }
-            if (last_end == 0 && end != 0 && !(auto_left > 0.0f && active_page == kCoopResultsPage)) {
-                last_end = end;
-                // The match results page is the final scoreboard (Mission Completed, money, medals).
+        const int32_t rounds = peek_image<int32_t>(kRoundsPlayed);
+        const int32_t limit = peek_image<int32_t>(kRoundLimit);
+        const bool round_game = type == 0 || type == 4 || type == 5 || type == 6 || type == 7 || type == 8 ||
+                                type == 9 || type == 10 || type == 12;
+        if (round_game && end != 0 && last_end == 0) {
+            const bool final_round = limit <= 0 || rounds + 1 >= limit;
+            if (final_round) {
+                const bool scoreboard_page = find_page_id(kScoreboardPage) != nullptr;
                 const bool results = find_page_id(kCoopResultsPage) != nullptr;
-                active_page = results ? kCoopResultsPage : kScoreboardPage;
+                active_page = scoreboard_page ? kScoreboardPage : (results ? kCoopResultsPage : kScoreboardPage);
                 auto_left = kRoundResultsSeconds;
                 end_hold = kRoundResultsSeconds;
-                log("scoreboard: match results page %08x %s", active_page, results ? "selected" : "missing");
+                log("scoreboard: match results page %08x %s (full %s, summary %s)", active_page,
+                    find_page() ? "selected" : "missing", scoreboard_page ? "loaded" : "missing",
+                    results ? "loaded" : "missing");
+            } else {
+                const bool round_mode = type == 4 || type == 5 || type == 6 || type == 7 || type == 8 ||
+                                        type == 9 || type == 12;
+                const bool round_page = round_mode && find_page_id(kCoopRoundPage) != nullptr;
+                const bool results_page = find_page_id(kCoopResultsPage) != nullptr;
+                const bool scoreboard_page = find_page_id(kScoreboardPage) != nullptr;
+                if (round_page) active_page = kCoopRoundPage;
+                else if (type == 10 && scoreboard_page) active_page = kScoreboardPage;
+                else active_page = results_page ? kCoopResultsPage : kScoreboardPage;
+                auto_left = 60.0f;   // until the next round clears the flag
+                log("scoreboard: round %d results page %08x %s", int(rounds + 1), active_page,
+                    find_page() ? "selected" : "missing");
             }
         }
-        last_task = last_end == 0 ? task : -1;
+        if (end == 0 && last_end != 0) {
+            auto_left = 0.0f;
+            end_hold = 0.0f;
+            log("scoreboard: round started, board hidden");
+        }
+        last_end = end;
     } else if (end_hold > 0.0f) {
         end_hold -= dt;   // match over, the game is leaving: let the results board finish
     } else {
         auto_left = 0.0f;
-        last_task = -1;
         last_end = 0;
     }
     if (auto_left > 0.0f) auto_left -= dt;
@@ -322,6 +344,16 @@ void install_scoreboard(int &installed) {
     installed += 1;
     log("scoreboard: PAGE_MULTIPLAYER_SCOREBOARD port installed (button mask 0x%x; PS3 0x4cbf00 / 0x4cbc10)",
         button_mask);
+}
+
+void show_round_results() {
+    const bool results = find_page_id(kCoopResultsPage) != nullptr;
+    const bool round_page = find_page_id(kCoopRoundPage) != nullptr;
+    active_page = results ? kCoopResultsPage : (round_page ? kCoopRoundPage : kScoreboardPage);
+    if (!find_page()) active_page = kScoreboardPage;
+    auto_left = kRoundResultsSeconds;
+    end_hold = kRoundResultsSeconds;
+    log("scoreboard: round results requested (%08x%s)", active_page, find_page() ? "" : ", page missing");
 }
 
 }  // namespace u2mp

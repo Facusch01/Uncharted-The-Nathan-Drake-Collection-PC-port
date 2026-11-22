@@ -98,6 +98,7 @@ void mm_reset();
 void mm_research();                  // nobody came: leave our gather room, search again
 void mm_leave();                     // matchmaking ends for this PC
 int mm_players();                    // players in our matchmaking room
+std::string room_member_name(uint32_t net_id);   // party/match room member name by net id
 
 }  // namespace u2mp::online
 
@@ -112,6 +113,8 @@ namespace u2mp::session {
 void online_reopen(net::Link *link, const net::Address *owner);
 // online.cpp -> session.cpp: the match room exists (room_id) or could not be made (0): finish Start Match.
 void online_match_ready(uint64_t room_id);
+// online.cpp -> session.cpp: a client finished joining the leader's match room after the follow.
+void online_match_member_joined();
 // online.cpp -> session.cpp: this player's name is the RPCN online name.
 void set_local_name(const std::string &name);
 // online.cpp -> session.cpp: the transport address of the member with this net id.
@@ -127,6 +130,8 @@ void online_signed_out();
 bool match_migration_ok();
 // The net id of the player with this NpId (from the host's kIds), 0 unknown.
 uint32_t net_id_of(const std::string &npid);
+// The room member's display name for a net id (party or match room), empty when unknown.
+std::string room_member_name(uint32_t net_id);
 // Match host migration: every player keeps its net id; owner NULL = this PC hosts now.
 void online_rehost(net::Link *link, const net::Address *owner, uint32_t new_host_net_id);
 // Session message type of online.cpp (below session::kFrontendMessages).

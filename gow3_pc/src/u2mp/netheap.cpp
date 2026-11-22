@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <windows.h>
 #include <unordered_set>
 #include <array>
 #include <utility>
@@ -82,25 +83,30 @@ std::array<void *, 128> vtable = make_vtable(std::make_integer_sequence<int, 128
 }  // namespace
 
 void netheap_install() {
-    constexpr uint64_t kAllocTablePtr = 0x104ae00, kNetContext = 0x14;
+    constexpr uint64_t kAllocTablePtr = 0x104ae00, kNetContext = 0x14, kNetHeapInit = 0xb45580;
+    constexpr size_t kBytes = 16u << 20;
     const uint64_t table = *image.at<uint64_t>(kAllocTablePtr);
     if (!table) {
         log("network heap: allocator table not set up yet");
         return;
     }
     auto *slot = reinterpret_cast<uint64_t *>(uintptr_t(table) + kNetContext * 8);
-    if (*slot == uint64_t(uintptr_t(&heap))) return;
     if (*slot) {
         log("network heap: context 0x14 already has a heap (%#llx), left alone", (unsigned long long)*slot);
         return;
     }
-    vtable[0x48 / 8] = reinterpret_cast<void *>(&heap_alloc);
-    vtable[0x58 / 8] = reinterpret_cast<void *>(&heap_free);
-    vtable[0x68 / 8] = reinterpret_cast<void *>(&heap_owns);
-    vtable[0x70 / 8] = reinterpret_cast<void *>(&heap_owns);
-    heap.vtable = vtable.data();
-    *slot = uint64_t(uintptr_t(&heap));
-    log("network heap: context 0x14 has its own heap");
+    void *memory = VirtualAlloc(nullptr, kBytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    if (!memory) {
+        log("network heap: no %zu MiB of host memory", kBytes >> 20);
+        return;
+    }
+    using Init = void(U2MP_GUEST *)(uint64_t, uint32_t);
+    reinterpret_cast<Init>(image.base + kNetHeapInit)(uint64_t(uintptr_t(memory)), uint32_t(kBytes));
+    if (!*slot) {
+        log("network heap: context 0x14 init failed at %#llx", (unsigned long long)kNetHeapInit);
+        return;
+    }
+    log("network heap: context 0x14: %zu MiB at %p", kBytes >> 20, memory);
 }
 
 void *netheap_alloc(size_t size, size_t align) { return heap_alloc(nullptr, size, align, nullptr, nullptr, nullptr); }

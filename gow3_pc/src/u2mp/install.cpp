@@ -151,6 +151,7 @@ extern "C" int u2mp_install(unsigned char *base, uint64_t size, const uint64_t *
     install_crashlog();
     install_frontend(installed);
     install_events(installed);
+    install_npcsync(installed);
     install_gameplay2(installed);
     install_gameplay3(installed);
     install_natives(installed);
@@ -170,6 +171,7 @@ extern "C" int u2mp_install(unsigned char *base, uint64_t size, const uint64_t *
     install_nullsites(installed);
     install_scripttime(installed);
     install_hud(installed);
+    install_medals(installed);
     install_scoreboard(installed);   // after install_loading: chains its 2D draw call
     install_rosternames(installed);  // team list rows: display name from the nick
     install_solocoop(installed);
@@ -177,6 +179,7 @@ extern "C" int u2mp_install(unsigned char *base, uint64_t size, const uint64_t *
     install_visibility(installed);   // per-frame call comes from matchend
     install_netanim(installed);
     install_netpatch(installed);   // after install_cinema: only a fallback when cinema's stream hook is absent
+    install_tier2(installed);
     log("%d functions restored", installed);
     return installed;
 }

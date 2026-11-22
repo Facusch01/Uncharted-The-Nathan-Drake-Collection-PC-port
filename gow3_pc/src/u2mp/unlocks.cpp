@@ -6,6 +6,7 @@
 // Reimplemented from the behaviour description u2mp/docs/spec/unlocks.md.
 
 #include "unlocks.h"
+#include "session_api.h"
 #include "u2mp_internal.h"
 
 #include <atomic>
@@ -38,6 +39,7 @@ constexpr uint64_t kSymbolBuckets = 0x15340d0;
 constexpr uint64_t kDebugUnlockAll = 0x1114178;
 constexpr uint64_t kNetState = 0x14ce97c;
 constexpr uint64_t kPlayerData = 0x11474f8;
+constexpr uint64_t kNgm = 0x113b760;
 constexpr uint64_t kBoosterList = 0x113a788;
 constexpr uint64_t kArtNames = 0x14705f0;
 constexpr uint64_t kArtNameCount = 0x14775f0;
@@ -119,6 +121,8 @@ uint8_t *g_patch = nullptr;  // our relocated net-patch9 copy (host heap, kept f
 uint64_t g_patch_size = 0;
 uint8_t *g_skins = nullptr;  // merged skin table
 int32_t g_skin_count = 0;
+uint8_t *g_slot_table = nullptr;  // the 10-entry per-slot table the game reads
+char g_slot_art[10][48];
 uint8_t *g_store = nullptr;  // store copy with the added skin items
 uint8_t *g_boosters = nullptr;  // net-patch9's own booster table
 int32_t g_booster_count = 0;
@@ -144,6 +148,8 @@ std::atomic<bool> g_choice_at_bind{false};
 
 bool g_skin_hooks = false;
 std::string g_forced_skin;
+std::string g_local_skin;
+std::string g_local_villain;
 
 // ---------------------------------------------------------------------------------------------
 // Memory access helpers (unaligned-safe)
@@ -380,6 +386,11 @@ void apply_skin_choice(const char *when) {
             wr32(field, 0, kDrake);
             reason = "not in the table: Drake";
         }
+        const char *chosen = skin_index(rd32(field)).second;
+        if (chosen && *chosen) {
+            if (s.field == 0x10c) g_local_skin = chosen;
+            else g_local_villain = chosen;
+        }
         if (skins_log_slot()) {
             const uint32_t now_id = rd32(field);
             const auto [now_at, now] = skin_index(now_id);
@@ -388,9 +399,6 @@ void apply_skin_choice(const char *when) {
         }
     }
 }
-
-// ---------------------------------------------------------------------------------------------
-// Hooks the game reaches
 
 // True when `item` is one of the records of the multiplayer store table.
 bool is_store_item(const uint8_t *item) {
@@ -519,8 +527,44 @@ void *spawn_lookup(const char *site, void *table, const char *name) {
     return r;
 }
 
-U2MP_GUEST void *spawn_lookup_a(void *table, const char *name) { return spawn_lookup("0x663280", table, name); }
-U2MP_GUEST void *spawn_lookup_b(void *table, const char *name) { return spawn_lookup("0x6636b0", table, name); }
+// A remote skin can be a different table position or a package the other PC did not import. Use the
+// local character's skin instead of passing NULL into the NetCharacter factory.
+const char *first_loaded_skin() {
+    const uint8_t *t = dc_find(kSkinSym);
+    const uint8_t *recs = t ? rdptr(t, 8) : nullptr;
+    for (int32_t i = 0; recs && i < rds32(t) && i < 512; ++i) {
+        const char *pkg = reinterpret_cast<const char *>(rdptr(recs + 0x30 * uint64_t(i), 8));
+        if (pkg && package_by_id(sid(pkg))) return pkg;
+    }
+    return nullptr;
+}
+const char *fallback_skin_name() {
+    if (!g_local_skin.empty()) return g_local_skin.c_str();
+    const char *first = first_loaded_skin();
+    return first ? first : "mp-hero";
+}
+U2MP_GUEST void *spawn_lookup_a(void *table, const char *name) {
+    void *r = spawn_lookup("0x663280", table, name);
+    if (r && name && *name) g_local_skin = name;
+    return r;
+}
+U2MP_GUEST void *spawn_lookup_b(void *table, const char *name) {
+    void *r = spawn_lookup("0x6636b0", table, name);
+    if (r) return r;
+    const char *fallback = fallback_skin_name();
+    r = guest<ArtLookupFn>(kFnArtLookup)(table, fallback);
+    if (!r) {
+        const char *first = first_loaded_skin();
+        if (first && std::strcmp(first, fallback) != 0) r = guest<ArtLookupFn>(kFnArtLookup)(table, first);
+    }
+    if (!r && std::strcmp(fallback, "mp-hero") != 0) r = guest<ArtLookupFn>(kFnArtLookup)(table, "mp-hero");
+    static bool said = false;
+    if (!said) {
+        said = true;
+        log("skins: remote model '%s' not loaded; using '%s'", name ? name : "(null)", fallback);
+    }
+    return r;
+}
 
 // ---------------------------------------------------------------------------------------------
 // net-patch9 loading and table building
@@ -575,83 +619,100 @@ void put_skin(uint8_t *rec, uint32_t index, bool villain, const char *package, u
 }
 
 void build_skin_table() {
-    const uint8_t *t = patch_symbol(kSkinSym);
-    if (!t) {
-        log("unlocks: net-patch9 has no skin table 0x%08x", kSkinSym);
-        return;
-    }
-    const int32_t n = rds32(t);
-    const uint8_t *recs = rdptr(t, 8);
-    bool ps4 = skin_records_ok(recs, n, 0x30, true, true);
-    if (!ps4 && !skin_records_ok(recs, n, 0x28, false, true)) {
-        log("unlocks: net-patch9 skin table (%d records) has an unknown layout; PS4 skins kept", n);
-        return;
-    }
-    int32_t stub_n = 0;
-    const uint8_t *stub_recs = nullptr;
-    if (g_skin_stub) {
-        const int32_t c = rds32(g_skin_stub);
-        if (c >= 1 && c <= 8 && skin_records_ok(rdptr(g_skin_stub, 8), c, 0x30, true, false)) {
-            stub_n = c;
-            stub_recs = rdptr(g_skin_stub, 8);
+    const uint8_t *np9 = patch_symbol(kSkinSym);
+    const uint8_t *stub = g_skin_stub;
+    int32_t np9_n = 0;
+    const uint8_t *np9_recs = nullptr;
+    uint64_t np9_stride = 0;
+    if (np9) {
+        np9_n = rds32(np9);
+        np9_recs = rdptr(np9, 8);
+        if (skin_records_ok(np9_recs, np9_n, 0x30, false, true)) {
+            np9_stride = 0x30;
+        } else if (np9_recs && np9_n > 0 && np9_n <= 512 && in_copy(np9_recs, 0x28 * uint64_t(np9_n))) {
+            bool ok = true;
+            for (int32_t i = 0; i < np9_n && ok; ++i) {
+                const uint8_t *r = np9_recs + 0x28 * uint64_t(i);
+                ok = package_name_ok(reinterpret_cast<const char *>(rdptr(r, 8)), true);
+            }
+            np9_stride = 0x28;
+            if (!ok) log("unlocks: net-patch9 skin records have unexpected package names; using the converted layout anyway");
         }
     }
-    const uint64_t capacity = uint64_t(n) + stub_n + 1 + 7;
-    const size_t bytes = 0x10 + 0x30 * capacity;
+    if (!np9_stride && !stub) return;
+
+    int32_t stub_n = 0;
+    const uint8_t *stub_recs = nullptr;
+    if (stub) {
+        stub_n = rds32(stub);
+        stub_recs = rdptr(stub, 8);
+        if (stub_n <= 0 || stub_n > 8 || !skin_records_ok(stub_recs, stub_n, 0x30, true, false)) stub_n = 0;
+    }
+
+    const int32_t reserve = (np9_stride ? np9_n : 0) + stub_n + 1 + int32_t(sizeof kExtraSkins / sizeof kExtraSkins[0]);
+    const size_t bytes = 0x10 + 0x30 * uint64_t(reserve);
     auto *block = static_cast<uint8_t *>(netheap_alloc(bytes, 16));
     if (!block) return;
     std::memset(block, 0, bytes);
     uint8_t *out = block + 0x10;
     auto rec_at = [&](int32_t i) { return out + 0x30 * uint64_t(i); };
 
-    for (int32_t i = 0; i < n; ++i) {
-        if (ps4) {
-            std::memcpy(rec_at(i), recs + 0x30 * uint64_t(i), 0x30);
-        } else {
-            const uint8_t *src = recs + 0x28 * uint64_t(i);
-            uint8_t *dst = rec_at(i);
-            std::memcpy(dst, src, 0x10);         // index, side, package ptr
-            std::memcpy(dst + 0x10, src + 0x10, 4);  // id (high half stays 0)
-            std::memcpy(dst + 0x18, src + 0x14, 0x14);  // name, photo, icon and the two values after
-        }
-    }
-    int32_t count = n, replaced = 0, appended = 0;
-    for (int32_t s = 0; s < stub_n; ++s) {
-        const uint8_t *src = stub_recs + 0x30 * uint64_t(s);
-        const uint32_t id = rd32(src, 0x10);
-        uint8_t *dst = nullptr;
-        for (int32_t i = 0; i < n && !dst; ++i)
-            if (rd32(rec_at(i), 0x10) == id) dst = rec_at(i);
-        if (dst) {
-            ++replaced;
-        } else {
-            dst = rec_at(count++);
-            ++appended;
-        }
-        std::memcpy(dst, src, 0x30);
-        if (char *copy = heap_string(reinterpret_cast<const char *>(rdptr(src, 8)))) wrptr(dst, 8, copy);
-    }
+    int32_t count = 0;
     auto has_id = [&](uint32_t id) {
         for (int32_t i = 0; i < count; ++i)
             if (rd32(rec_at(i), 0x10) == id) return true;
         return false;
     };
+    auto add_record = [&](const uint8_t *src) {
+        const uint32_t id = rd32(src, 0x10);
+        int32_t at = -1;
+        for (int32_t i = 0; i < count && at < 0; ++i)
+            if (rd32(rec_at(i), 0x10) == id) at = i;
+        uint8_t *o = rec_at(at < 0 ? count : at);
+        if (at < 0) ++count;
+        std::memcpy(o, src, 0x30);
+        if (char *copy = heap_string(reinterpret_cast<const char *>(rdptr(o, 8)))) wrptr(o, 8, copy);
+    };
+
+    // Keep the PS4 stub's order first: Drake, Eddie and the other default picks stay at the low indices
+    // the game's own player data paths use. The imported records follow.
+    for (int32_t i = 0; i < stub_n; ++i) add_record(stub_recs + 0x30 * uint64_t(i));
+    for (int32_t i = 0; i < np9_n && np9_stride; ++i) {
+        const uint8_t *r = np9_recs + np9_stride * uint64_t(i);
+        if (np9_stride == 0x30) {
+            add_record(r);
+            continue;
+        }
+        alignas(8) uint8_t rec[0x30] = {};
+        wr32(rec, 0, rd32(r, 0));
+        wr32(rec, 4, rd32(r, 4));
+        wrptr(rec, 8, rdptr(r, 8));
+        wr32(rec, 0x10, rd32(r, 0x10));
+        for (int k = 0; k < 5; ++k) wr32(rec, 0x18 + 4 * k, rd32(r, 0x14 + 4 * k));
+        add_record(rec);
+    }
     if (!has_id(kBaseballDrake)) {
-        put_skin(rec_at(count++), 1, false, "mp-hero-red", kBaseballDrake, kBaseballName, kBaseballPhoto, kBaseballIcon);
-        ++appended;
+        put_skin(rec_at(count), uint32_t(count), false, "mp-hero-red", kBaseballDrake, kBaseballName,
+                 kBaseballPhoto, kBaseballIcon);
+        ++count;
     }
     for (const ExtraSkin &e : kExtraSkins) {
         if (has_id(e.id)) continue;
         put_skin(rec_at(count), uint32_t(count), e.villain, e.package, e.id, e.name, e.photo, e.icon);
         ++count;
-        ++appended;
+    }
+    for (int32_t i = 0; i < count; ++i) wr32(rec_at(i), 0, uint32_t(i));
+    for (int32_t i = 0; i < 10; ++i) {
+        const char *pkg = reinterpret_cast<const char *>(rdptr(rec_at(i), 8));
+        std::snprintf(g_slot_art[i], sizeof g_slot_art[i], "%s", pkg ? pkg : "mp-hero");
+        wrptr(rec_at(i), 8, g_slot_art[i]);
     }
     wr32(block, 0, uint32_t(count));
     wrptr(block, 8, out);
     g_skins = block;
     g_skin_count = count;
+    g_slot_table = block;
 
-    // The player data message sends skins by table position, so every PC must have the same order.
     uint32_t fp = 0;
     for (int32_t i = 0; i < count; ++i) {
         char text[16];
@@ -688,11 +749,11 @@ void build_skin_table() {
     log("unlocks: skin actors: %d records from the PS4 game, %d from the import overlay, missing:%s", from_game,
         from_import, missing.empty() ? " none" : missing.c_str());
     g_labels_ready.store(true, std::memory_order_release);
-    log("unlocks: skin table: %d GOTY records (%s layout) + PS4 %d (%d replaced, %d appended) = %d", n,
-        ps4 ? "PS4" : "0x28-byte converted", stub_n, replaced, appended, count);
+    log("unlocks: skin table: %d net-patch9 records (%s layout) + PS4/extras = %d", np9_n,
+        np9_stride == 0x30 ? "PS4" : "converted", count);
 }
 
-// A copy of the game's store table whose hero / villain lists also offer the skins of kExtraSkins.
+// A copy of the game's store table whose hero / villain lists also offer every table skin.
 void build_store_copy() {
     const uint8_t *s = dc_find(kStoreSym);
     if (!s || s == g_store) return;
@@ -714,12 +775,28 @@ void build_store_copy() {
         const uint8_t *items = rdptr(section, 0x10);
         if (n <= 0 || n > 200 || !items) continue;
 
-        std::vector<const ExtraSkin *> wanted;
-        for (const ExtraSkin &e : kExtraSkins) {
-            if (e.villain != villain) continue;
-            bool present = false;
-            for (int32_t k = 0; k < n && !present; ++k) present = rd32(items + 0x50 * uint64_t(k), 8) == e.id;
-            if (!present) wanted.push_back(&e);
+        struct StoreWish {
+            uint32_t id;
+            const uint8_t *package;
+        };
+        std::vector<StoreWish> wanted;
+        auto offer = [&](uint32_t id, const uint8_t *package) {
+            if (!id || !package) return;
+            for (int32_t k = 0; k < n; ++k)
+                if (rd32(items + 0x50 * uint64_t(k), 8) == id) return;
+            for (const StoreWish &w : wanted)
+                if (w.id == id) return;
+            wanted.push_back({id, package});
+        };
+        if (g_skins) {
+            for (int32_t k = 0; k < g_skin_count; ++k) {
+                const uint8_t *rec = g_skins + 0x30 * uint64_t(k);
+                if ((rd32(rec, 4) == 1) != villain) continue;
+                offer(rd32(rec, 0x10), rdptr(rec, 8));
+            }
+        } else {
+            for (const ExtraSkin &e : kExtraSkins)
+                if (e.villain == villain) offer(e.id, reinterpret_cast<const uint8_t *>(e.package));
         }
         if (wanted.empty()) continue;
         const int32_t total = n + int32_t(wanted.size());
@@ -731,10 +808,10 @@ void build_store_copy() {
             uint8_t *item = list + 0x50 * (uint64_t(n) + w);
             std::memcpy(item, items + 0x50 * uint64_t(n - 1), 0x50);
             wr32(item, 4, 10);
-            wr32(item, 8, wanted[w]->id);
+            wr32(item, 8, wanted[w].id);
             wr64(item, 0x18, 0);
-            wrptr(item, 0x40, wanted[w]->package);
-            wr64(item, 0x48, wanted[w]->id);
+            wrptr(item, 0x40, wanted[w].package);
+            wr64(item, 0x48, wanted[w].id);
         }
         wr32(section, 8, uint32_t(total));
         wrptr(section, 0x10, list);
@@ -1070,6 +1147,33 @@ const char *unlocks_text(uint32_t id) {
 }
 
 uint32_t unlocks_skin_fingerprint() { return g_fingerprint.load(); }
+const char *unlocks_local_skin() { return g_local_skin.empty() ? nullptr : g_local_skin.c_str(); }
+const char *unlocks_local_villain() { return g_local_villain.empty() ? nullptr : g_local_villain.c_str(); }
+
+void unlocks_apply_slot_skins() {
+    if (!g_slot_table) return;
+    const char *local_hero = unlocks_local_skin();
+    const char *local_villain = unlocks_local_villain();
+    uint8_t *base = game(kNgm + 0x10);
+    uint8_t *local = rdptr(game(kNgm), 0);
+    for (int k = 0; k < 10; ++k) {
+        uint8_t *slot = base + 0x2c0 * uint64_t(k);
+        const int32_t id = int32_t(rd32(slot, 0x120));
+        if (id < 1 || id > 10) continue;
+        const int32_t index = id - 1;
+        std::string member_hero, member_villain;
+        const char *hero = local_hero, *villain = local_villain;
+        if (slot != local && session::member_skins(uint32_t(id), member_hero, member_villain)) {
+            hero = member_hero.c_str();
+            villain = member_villain.c_str();
+        }
+        const int32_t team = int32_t(rd32(slot, 0x134));
+        const char *art = villain && *villain && team == 1 ? villain : hero;
+        if (art && *art) std::snprintf(g_slot_art[index], sizeof g_slot_art[index], "%s", art);
+        wrptr(g_slot_table + 0x10 + 0x30 * uint64_t(index), 8, g_slot_art[index]);
+        wr32(slot, 0x138, uint32_t(index));
+    }
+}
 
 void install_unlocks(int &installed) {
     const char *env = std::getenv("UNCHARTED_U2MP_UNLOCKS");

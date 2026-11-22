@@ -19,6 +19,8 @@
 
 #include "u2mp_internal.h"
 
+#include <windows.h>
+
 #include <atomic>
 #include <cmath>
 #include <cstdint>
@@ -35,7 +37,15 @@ namespace {
 // ---- image offsets (Uncharted 2 PS4 1.02) -------------------------------------------------------
 constexpr uint64_t kWriterSite = 0x6364b5, kWriterResume = 0x638000;
 constexpr uint64_t kReaderSite = 0x66c035, kReaderResume = 0x66c250;
+constexpr uint64_t kIndexSite = 0x66b637, kIndexResume = 0x66b6a5;
+constexpr uint64_t kPrefillSite = 0x5f3d63, kPrefillResume = 0x5f3d6a;
+constexpr uint64_t kDepthSite = 0x5f3dd1, kDepthResume = 0x5f3dd8;
+constexpr uint64_t kPoseGenerator = 0x100ac80;
+constexpr uint64_t kPadPlayerSite = 0x60e296, kPadPlayerResume = 0x60e29e;
+constexpr uint64_t kPadOtherSite = 0x60e9f3, kPadOtherResume = 0x60e9f9;
 constexpr uint64_t kSnapshotReader = 0x66b430;
+constexpr uint64_t kSnapshotEpilogue = 0x66c380;
+constexpr uint64_t kAssertSig = 0x156df78;
 constexpr uint64_t kVisitorReset = 0x66b270;
 constexpr uint64_t kFireEvents = 0x4bcfd0;
 constexpr uint64_t kGeneratorSlot4 = 0x5f48d0;
@@ -51,6 +61,15 @@ template <typename T> T peek(const void *p) {
 template <typename T> void poke(void *p, T v) { std::memcpy(p, &v, sizeof v); }
 const uint8_t *peek_ptr(const void *p) { return peek<const uint8_t *>(p); }
 
+// Guest animation records can carry debug fill (0xaaaaaaaa...) in fields the game did not set.
+bool guest_pointer(const void *p) {
+    const uintptr_t v = uintptr_t(p);
+    if (v < 0x10000 || v >= 0x0000800000000000ull) return false;
+    MEMORY_BASIC_INFORMATION m{};
+    if (VirtualQuery(p, &m, sizeof m) != sizeof m) return false;
+    return m.State == MEM_COMMIT && !(m.Protect & (PAGE_NOACCESS | PAGE_GUARD));
+}
+
 // At most 8 log lines from the two stream call-outs together; the rest is silent.
 std::atomic<int> g_overflow_lines{0};
 bool overflow_line_allowed() {
@@ -64,15 +83,9 @@ bool overflow_line_allowed() {
 struct PhaseFormat {
     unsigned bits;
     float scale;
-    float step;  // 1 / scale, rounded to float
+    float step;
 };
-PhaseFormat phase_format(const uint8_t *info) {
-    if (!info) return {8, 255.0f, 1.0f / 255.0f};
-    const uint16_t frames = peek<uint16_t>(info + 0x22);
-    if (frames <= 8) return {4, 15.0f, 1.0f / 15.0f};
-    if (frames > 64) return {16, 65535.0f, 1.0f / 65535.0f};
-    return {8, 255.0f, 1.0f / 255.0f};
-}
+constexpr PhaseFormat kPhase{10, 1023.0f, 1.0f / 1023.0f};
 
 // Float to int32 the way the x86 conversion saturates: NaN and anything too low give INT32_MIN,
 // anything too high INT32_MAX, the rest truncates toward zero.
@@ -139,15 +152,25 @@ uint32_t stream_get(uint8_t *stream, unsigned bits) {
 // Writer call-out: r12 = the clip command just written (anim pointer at +4, frame at +0x10),
 // r15 = the bit stream. Appends the clip's phase.
 U2MP_GUEST void write_clip_phase(const uint8_t *cmd, uint8_t *stream) {
+    static int calls = 0;
     const uint8_t *anim = peek_ptr(cmd + 4);
     const uint8_t *info = anim ? peek_ptr(anim + 0x28) : nullptr;
-    const PhaseFormat fmt = phase_format(info);
+    const PhaseFormat fmt = kPhase;
+    if (calls < 12) {
+        ++calls;
+        log("netanim: clip cmd %p size %u anim %p stream %p pos %u limit %u", static_cast<const void *>(cmd),
+            unsigned(peek<uint16_t>(cmd + 2)), static_cast<const void *>(anim), static_cast<void *>(stream),
+            stream_position(stream), stream_limit(stream));
+    }
     int32_t quantised = 0;
     if (info) {
         const float frame = peek<float>(cmd + 0x10);
-        const float last_frame = float(peek<uint16_t>(info + 0x22)) - 1.0f;
-        const float scaled = frame * fmt.scale;
-        quantised = to_int32_saturated(scaled / last_frame);
+        const uint16_t frames = peek<uint16_t>(info + 0x22);
+        if (frames > 1 && frame > 0.0f) {
+            const float scaled = frame * fmt.scale;
+            quantised = to_int32_saturated(scaled / (float(frames) - 1.0f));
+            if (quantised > 1023) quantised = 1023;
+        }
     }
     if (!stream_has_room(stream, fmt.bits)) {
         if (overflow_line_allowed()) log("netanim: snapshot stream full, clip phase not written");
@@ -156,24 +179,121 @@ U2MP_GUEST void write_clip_phase(const uint8_t *cmd, uint8_t *stream) {
     stream_put(stream, uint32_t(quantised), fmt.bits);
 }
 
-// Reader call-out: anim = the anim just resolved, frame = the reader's rbp. Reads the phase and
-// passes it to visitor slot 3 with the anim count as it was before this anim.
-U2MP_GUEST void read_clip_phase(const uint8_t *anim, uint8_t *frame) {
-    uint8_t *stream = frame - 0x150;
-    uint8_t *visitor = const_cast<uint8_t *>(peek_ptr(frame - 0x190));
-    const uint32_t counter = peek<uint32_t>(frame - 0x180);
-    const uint8_t *info = anim ? peek_ptr(anim + 0x28) : nullptr;
-    const PhaseFormat fmt = phase_format(info);
-    if (!stream_has_room(stream, fmt.bits)) {
-        if (overflow_line_allowed()) log("netanim: snapshot stream ends before a clip phase");
-        return;
+// Per-thread snapshot parse state: the 11-bit anim indices and the list mark.
+thread_local uint16_t g_indices[32];
+thread_local uint32_t g_index_count;
+thread_local struct { uint8_t *list; uint32_t count, top; } g_mark;
+thread_local struct { const uint8_t *group; uint32_t idx; const uint8_t *anim; } g_cache[8];
+thread_local unsigned g_cache_next;
+std::atomic<int> g_leaves{0}, g_clips{0}, g_poses{0}, g_misses{0}, g_deep{0}, g_indices_read{0};
+
+uint32_t read_bits(uint8_t *stream, unsigned bits) { return stream_get(stream, bits); }
+
+U2MP_GUEST void read_indices(uint8_t *rbp, uint32_t count) {
+    const int seen = g_indices_read.fetch_add(1) + 1;
+    if (seen <= 4) log("netanim: %u anim indices", count);
+    uint8_t *reader = rbp - 0x150;
+    const uint32_t pos = stream_position(reader);
+    const uint32_t max = stream_limit(reader);
+    g_index_count = count < 32 ? count : 32;
+    uint32_t p = pos;
+    for (uint32_t i = 0; i < count; ++i, p += 11) {
+        uint8_t tmp[0x20];
+        poke<uint32_t>(tmp, p);
+        poke<uint32_t>(tmp + 8, p);
+        poke<uint32_t>(tmp + 0xc, max);
+        poke<uint32_t *>(tmp, stream_words(reader));
+        g_indices[i < 32 ? i : 31] = p + 11 <= max ? uint16_t(stream_get(tmp, 11)) : 0xffff;
     }
-    const uint32_t raw = stream_get(stream, fmt.bits);
-    if (!anim || !visitor) return;
-    const float phase = float(raw) * fmt.step;
-    using VisitFn = void(U2MP_GUEST *)(void *, const void *, uint32_t, float);
-    const uint8_t *vtable = peek_ptr(visitor);
-    peek<VisitFn>(vtable + 0x18)(visitor, anim, counter, phase);
+    poke<uint32_t>(reader + 8, p);
+}
+
+bool name_at(const uint8_t *p, char *out, size_t size) {
+    for (size_t at = 0; p && at + 16 <= size; at += 16) {
+        std::memcpy(out + at, p + at, 16);
+        if (std::memchr(out + at, 0, 16)) return true;
+    }
+    return false;
+}
+
+const uint8_t *anim_for(const uint8_t *group, uint32_t idx) {
+    if (!group || !guest_pointer(group) || idx >= 0x800) return nullptr;
+    for (unsigned i = 0; i < 8; ++i)
+        if (g_cache[i].group == group && g_cache[i].idx == idx && g_cache[i].anim) return g_cache[i].anim;
+    const uint8_t *tab = peek_ptr(peek_ptr(group + 0x30) + 0x10);
+    if (!tab || !guest_pointer(tab) || idx >= peek<uint32_t>(tab)) return nullptr;
+    const uint8_t *entry = peek_ptr(tab + 8) + uint64_t(idx) * 16;
+    if (!guest_pointer(entry)) return nullptr;
+    const uint32_t want = peek<uint32_t>(entry);
+    const uint8_t *x = peek_ptr(entry + 8);
+    const uint8_t *found = nullptr;
+    for (int deref = 0; deref < 2 && !found && x; ++deref) {
+        const uint8_t *a = deref ? peek_ptr(x) : x;
+        char name[128];
+        const uint8_t *text = a ? peek_ptr(a) : nullptr;
+        const uint8_t *clip = a ? peek_ptr(a + 0x28) : nullptr;
+        if (a && guest_pointer(a) && text && guest_pointer(text) && name_at(text, name, sizeof name) &&
+            sid(name) == want && clip && guest_pointer(clip) && peek<uint16_t>(clip + 0x22))
+            found = a;
+    }
+    if (found) {
+        const unsigned k = g_cache_next++ & 7;
+        g_cache[k] = {group, idx, found};
+    } else {
+        g_misses.fetch_add(1);
+    }
+    return found;
+}
+
+U2MP_GUEST void read_leaf(uint8_t *rbp, const uint8_t *group, uint32_t next) {
+    const int leaf = g_leaves.fetch_add(1) + 1;
+    uint8_t *reader = rbp - 0x150;
+    uint32_t q = 0;
+    if (stream_has_room(reader, kPhase.bits)) q = stream_get(reader, kPhase.bits);
+    const uint8_t *gen = peek_ptr(rbp - 0x190);
+    if (!gen || !guest_pointer(gen)) return;
+    const uint8_t *vt = peek_ptr(gen);
+    if (vt != image.base + kPoseGenerator) return;
+    const uint32_t slot = peek<uint32_t>(rbp - 0x180);
+    const uint32_t sub = peek<uint32_t>(gen + 0xc);
+    if (sub + slot >= 7) return;
+    const uint8_t *anim = next >= 1 && next <= g_index_count ? anim_for(group, g_indices[next - 1]) : nullptr;
+    if (anim) {
+        using ClipFn = void(U2MP_GUEST *)(void *, const void *, uint32_t, float);
+        reinterpret_cast<ClipFn>(peek<uint64_t>(vt + 0x18))(const_cast<uint8_t *>(gen), anim, slot, float(q) * kPhase.step);
+        g_clips.fetch_add(1);
+    } else {
+        using PoseFn = void(U2MP_GUEST *)(void *, uint32_t);
+        reinterpret_cast<PoseFn>(peek<uint64_t>(vt + 0x28))(const_cast<uint8_t *>(gen), slot);
+        g_poses.fetch_add(1);
+    }
+    if (leaf % 64 == 0)
+        log("netanim: leaves %d, clips %d, poses %d, misses %d, deep drops %d, index reads %d", leaf,
+            g_clips.load(), g_poses.load(), g_misses.load(), g_deep.load(), g_indices_read.load());
+}
+
+U2MP_GUEST void prefill(uint8_t *list, uint32_t base) {
+    uint32_t *words = peek<uint32_t *>(list);
+    uint32_t count = peek<uint32_t>(list + 0xc);
+    uint32_t top = peek<uint32_t>(list + 0x10);
+    for (uint32_t s = base; s <= base + 1; ++s) {
+        words[count] = 0x0002000du;
+        words[count + 1] = s;
+        count += 2;
+        if (top < s) top = s;
+    }
+    poke<uint32_t>(list + 0xc, count);
+    poke<uint32_t>(list + 0x10, top);
+    g_mark = {list, count, top};
+}
+
+U2MP_GUEST void depth_check(uint8_t *list, uint32_t base) {
+    const uint32_t top = peek<uint32_t>(list + 0x10);
+    const uint32_t depth = top >= base ? top - base : 0;
+    if (depth <= 5 || g_mark.list != list) return;
+    poke<uint32_t>(list + 0xc, g_mark.count);
+    poke<uint32_t>(list + 0x10, g_mark.top);
+    if (g_deep.fetch_add(1) < 8) log("netanim: deep tree dropped (%u slots, limit 5)", depth);
 }
 
 // ---- call-out stubs -----------------------------------------------------------------------------
@@ -259,14 +379,71 @@ void build_reader_stub(uint8_t *stub) {
     Code c{stub};
     c.bytes({0x4c, 0x89, 0xb5, 0x78, 0xfe, 0xff, 0xff});  // mov [rbp-0x188], r14 (replaced store)
     emit_save(c);
-    c.bytes({0x48, 0x89, 0xc7});        // mov rdi, rax (the anim)
-    c.bytes({0x48, 0x8b, 0x75, 0x00});  // mov rsi, [rbp]: the reader's own rbp, pushed above
-    emit_call(c, reinterpret_cast<void *>(&read_clip_phase));
+    c.bytes({0x48, 0x8b, 0x7d, 0x00});  // mov rdi, [rbp]: the reader's own rbp
+    c.bytes({0x48, 0x89, 0xc6});        // mov rsi, rax (the art group)
+    c.bytes({0x4c, 0x89, 0xf2});        // mov rdx, r14 (the index + 1)
+    emit_call(c, reinterpret_cast<void *>(&read_leaf));
     emit_restore(c);
     c.bytes({0x48, 0x8b, 0x85, 0x80, 0xfe, 0xff, 0xff});  // mov rax, [rbp-0x180]
     c.bytes({0xff, 0xc0});                                // inc eax
     c.bytes({0x48, 0x89, 0x85, 0x80, 0xfe, 0xff, 0xff});  // mov [rbp-0x180], rax
     emit_jump(c, kReaderResume);
+}
+
+void build_index_stub(uint8_t *stub) {
+    Code c{stub};
+    emit_save(c);
+    c.bytes({0x48, 0x8b, 0x7d, 0x00});  // mov rdi, [rbp]
+    c.bytes({0x44, 0x89, 0xf6});        // mov esi, r14d
+    emit_call(c, reinterpret_cast<void *>(&read_indices));
+    emit_restore(c);
+    emit_jump(c, kIndexResume);
+}
+
+void build_prefill_stub(uint8_t *stub) {
+    Code c{stub};
+    emit_save(c);
+    c.bytes({0x48, 0x89, 0xdf});  // mov rdi, rbx (the list)
+    c.bytes({0x44, 0x89, 0xe6});  // mov esi, r12d (the base slot)
+    emit_call(c, reinterpret_cast<void *>(&prefill));
+    emit_restore(c);
+    c.bytes({0x48, 0xb9});  // mov rcx, image + 0x100ac80
+    c.u64(uint64_t(uintptr_t(image.base + kPoseGenerator)));
+    emit_jump(c, kPrefillResume);
+}
+
+void build_depth_stub(uint8_t *stub) {
+    Code c{stub};
+    emit_save(c);
+    c.bytes({0x4c, 0x89, 0xff});  // mov rdi, r15 (the list)
+    c.bytes({0x89, 0xde});        // mov esi, ebx (the base slot)
+    emit_call(c, reinterpret_cast<void *>(&depth_check));
+    emit_restore(c);
+    c.bytes({0x41, 0x8b, 0x47, 0x0c});  // mov eax, [r15+0xc]
+    c.bytes({0x49, 0x8b, 0x0f});        // mov rcx, [r15]
+    emit_jump(c, kDepthResume);
+}
+
+// A snapshot's bit count decides how many bytes are copied: the stream is 32-bit words filled
+// from the top, but the copy is ceil(bits/8) bytes. On little-endian the last partial word's high
+// bits never reach the wire, leaving whatever an earlier snapshot left there. Round the count up
+// to whole words (the writer's rest of the word is zero after the end marker); the history holds
+// 0xaa bytes, so a count above 0x550 keeps its exact value.
+U2MP_GUEST void snapshot_pad(uint8_t *snapshot, uint32_t bits) {
+    uint32_t n = (bits + 31u) & ~31u;
+    if (n > 0x550) n = bits;
+    std::memcpy(snapshot + 0xbc, &n, 4);
+}
+
+void build_pad_stub(uint8_t *stub, bool player) {
+    Code c{stub};
+    emit_save(c);
+    if (player) c.bytes({0x4c, 0x89, 0xe7});  // mov rdi, r12 (the player snapshot)
+    else c.bytes({0x48, 0x8b, 0x3b});         // mov rdi, [rbx] (the other writer's snapshot)
+    c.bytes({0x89, 0xc6});                    // mov esi, eax (the bit count)
+    emit_call(c, reinterpret_cast<void *>(&snapshot_pad));
+    emit_restore(c);
+    emit_jump(c, player ? kPadPlayerResume : kPadOtherResume);
 }
 
 // Writes `jmp stub` at the site and fills the rest of the replaced bytes with int3.
@@ -345,9 +522,9 @@ U2MP_GUEST void visit_nothing(uint8_t *) {}
 // Records an animation that has events; the key is its event table's id.
 U2MP_GUEST void visit_anim(uint8_t *visitor, const uint8_t *anim, uint32_t, float phase) {
     poke<uint32_t>(visitor + kVisitorLastKey, 0);
-    if (!anim) return;
+    if (!anim || !guest_pointer(anim)) return;
     const uint8_t *table = peek_ptr(anim + 0x48);
-    if (!table || peek<uint32_t>(table + 4) == 0 || !peek_ptr(anim + 0x28)) return;
+    if (!guest_pointer(table) || peek<uint32_t>(table + 4) == 0 || !guest_pointer(peek_ptr(anim + 0x28))) return;
     const uint32_t key = peek<uint32_t>(table);
     poke<uint32_t>(visitor + kVisitorLastKey, key);
     visitor_list(visitor)->append({key, anim, phase, 1, 0});
@@ -584,11 +761,34 @@ template <size_t N> bool all_match(const Check (&checks)[N]) {
 
 }  // namespace
 
+// The snapshot parser's assert blocks (each loads the assertion hook from the same global) end the
+// parse instead: a garbled snapshot must not take the game down, and the parse's own epilogue is
+// what the game uses when it runs out of data.
+int skip_snapshot_asserts() {
+    int patched = 0;
+    for (uint64_t at = kSnapshotReader; at + 7 <= kSnapshotEpilogue && patched < 32; ++at) {
+        const uint8_t *p = image.base + at;
+        if (p[0] != 0x48 || p[1] != 0x8b || p[2] != 0x05) continue;
+        if (at + 7 + int64_t(peek<int32_t>(p + 3)) != kAssertSig) continue;
+        const int64_t delta = int64_t(image.base + kSnapshotEpilogue) - int64_t(image.base + at + 5);
+        if (delta < INT32_MIN || delta > INT32_MAX) break;
+        uint8_t jump[7] = {0xe9, 0, 0, 0, 0, 0x90, 0x90};
+        poke<int32_t>(jump + 1, int32_t(delta));
+        std::memcpy(image.base + at, jump, sizeof jump);
+        ++patched;
+        at += 6;
+    }
+    return patched;
+}
+
 void install_netanim(int &installed) {
     if (const char *env = std::getenv("UNCHARTED_U2MP_NETANIM"); env && std::strcmp(env, "0") == 0) {
         log("netanim: off (UNCHARTED_U2MP_NETANIM=0)");
         return;
     }
+
+    const int assert_sites = skip_snapshot_asserts();
+    if (assert_sites) log("netanim: snapshot parse aborts on asserts (%d sites)", assert_sites);
 
     static const unsigned char writer_site[] = {0x41, 0xff, 0xc2, 0x41, 0xff, 0xc6, 0xe9, 0x40, 0x1b, 0x00, 0x00};
     static const unsigned char writer_eq[] = {0x44, 0x3b, 0x5c, 0x24, 0x54, 0x0f, 0x84, 0xb4};
@@ -599,10 +799,18 @@ void install_netanim(int &installed) {
     static const unsigned char reader_jne[] = {0x48, 0x85, 0xc0, 0x75, 0x35};
     static const unsigned char reader_entry[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55,
                                                  0x41, 0x54, 0x53, 0x48, 0x81, 0xec, 0x88, 0x01, 0x00, 0x00};
+    static const unsigned char index_site[] = {0x4c, 0x8d, 0x35, 0x3c, 0xc7, 0x81, 0x00};
+    static const unsigned char prefill_site[] = {0x48, 0x8d, 0x0d, 0x16, 0x6f, 0xa1, 0x00};
+    static const unsigned char depth_site[] = {0x41, 0x8b, 0x47, 0x0c, 0x49, 0x8b, 0x0f};
+    static const unsigned char c_room[] = {0x8d, 0x42, 0x04}, c_clear[] = {0x83, 0xf9, 0x03},
+                               c_add[] = {0x83, 0xc0, 0x04};
     static const Check stream_checks[] = {
         {kWriterSite, writer_site, sizeof writer_site}, {0x6363f6, writer_eq, sizeof writer_eq},
         {0x63646c, writer_jae, sizeof writer_jae},      {kReaderSite, reader_site, sizeof reader_site},
         {0x66bffb, reader_jne, sizeof reader_jne},      {kSnapshotReader, reader_entry, sizeof reader_entry},
+        {kIndexSite, index_site, sizeof index_site},    {kPrefillSite, prefill_site, sizeof prefill_site},
+        {kDepthSite, depth_site, sizeof depth_site},    {0x6367cb, c_room, sizeof c_room},
+        {0x6368a0, c_clear, sizeof c_clear},            {0x6368b7, c_add, sizeof c_add},
     };
     if (!all_match(stream_checks)) {
         log("netanim: snapshot writer / reader bytes differ from 1.02, left alone (no clip phases)");
@@ -612,38 +820,54 @@ void install_netanim(int &installed) {
     // Both requests are always made: their order and size decide where the stubs land.
     uint8_t *writer_stub = near_stub(512);
     uint8_t *reader_stub = near_stub(512);
-    if (!writer_stub || !reader_stub) {
+    uint8_t *index_stub = near_stub(512);
+    uint8_t *prefill_stub = near_stub(512);
+    uint8_t *depth_stub = near_stub(512);
+    if (!writer_stub || !reader_stub || !index_stub || !prefill_stub || !depth_stub) {
         log("netanim: no stub memory near the image");
         return;
     }
     build_writer_stub(writer_stub);
     build_reader_stub(reader_stub);
+    build_index_stub(index_stub);
+    build_prefill_stub(prefill_stub);
+    build_depth_stub(depth_stub);
+    log("netanim: stubs writer=%p reader=%p index=%p prefill=%p depth=%p", static_cast<void *>(writer_stub),
+        static_cast<void *>(reader_stub), static_cast<void *>(index_stub), static_cast<void *>(prefill_stub),
+        static_cast<void *>(depth_stub));
     if (!jump_to_stub(kWriterSite, kWriterSiteLength, writer_stub)) return;
     if (!jump_to_stub(kReaderSite, kReaderSiteLength, reader_stub)) return;
-    installed += 2;
+    if (!jump_to_stub(kIndexSite, sizeof index_site, index_stub)) return;
+    if (!jump_to_stub(kPrefillSite, sizeof prefill_site, prefill_stub)) return;
+    if (!jump_to_stub(kDepthSite, sizeof depth_site, depth_stub)) return;
+    poke<uint8_t>(image.base + 0x6367cd, 10);
+    poke<uint8_t>(image.base + 0x6368a2, 9);
+    poke<uint8_t>(image.base + 0x6368b9, 10);
+    installed += 5;
     log("netanim: snapshot clip phases restored (writer 0x6364b5, reader 0x66c035; both PCs need this build)");
+    log("netanim: anim indices, bind-pose prefill and tree depth guard installed");
 
-    static const unsigned char slot4[] = {0xc3, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x2e,
-                                          0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00};
-    static const unsigned char slot4_caller[] = {0x48, 0x8b, 0x7b, 0x40, 0x48, 0x8b, 0x07, 0x48, 0x8b, 0x40, 0x20};
-    static const unsigned char fire_entry[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55,
-                                               0x41, 0x54, 0x53, 0x48, 0x83, 0xec, 0x18, 0x4d, 0x89, 0xce};
-    static const unsigned char reset_body[] = {0xc5, 0xf8, 0x57, 0xc0, 0xc5, 0xf8, 0x29, 0x47, 0x10,
-                                               0xc5, 0xf8, 0x28, 0x05, 0xbf, 0xa1, 0x7c, 0x00, 0xc5,
-                                               0xf8, 0x29, 0x47, 0x20, 0xc6, 0x47, 0x30, 0x00, 0xc3};
-    static const Check slot_checks[] = {
-        {kGeneratorSlot4, slot4, sizeof slot4},
-        {kSlot4Caller, slot4_caller, sizeof slot4_caller},
-        {kFireEvents, fire_entry, sizeof fire_entry},
-        {kVisitorReset, reset_body, sizeof reset_body},
-    };
-    if (!all_match(slot_checks)) {
-        log("netanim: generator slot 4 / helpers differ from 1.02, slot left as it is");
-        return;
+    static const unsigned char pad_player[8] = {0x41, 0x89, 0x84, 0x24, 0xbc, 0x00, 0x00, 0x00};
+    static const unsigned char pad_other[6] = {0x89, 0x83, 0xbc, 0x00, 0x00, 0x00};
+    const char *pad = std::getenv("UNCHARTED_U2MP_NETANIM_PAD");
+    if (!(pad && std::strcmp(pad, "0") == 0) && image.matches(kPadPlayerSite, pad_player, sizeof pad_player) &&
+        image.matches(kPadOtherSite, pad_other, sizeof pad_other)) {
+        uint8_t *player_stub = near_stub(384);
+        uint8_t *other_stub = near_stub(384);
+        if (player_stub && other_stub) {
+            build_pad_stub(player_stub, true);
+            build_pad_stub(other_stub, false);
+            if (jump_to_stub(kPadPlayerSite, sizeof pad_player, player_stub) &&
+                jump_to_stub(kPadOtherSite, sizeof pad_other, other_stub)) {
+                installed += 1;
+                log("netanim: snapshot bit counts padded to whole words");
+            }
+        }
+    } else {
+        log("netanim: bit count padding off (UNCHARTED_U2MP_NETANIM_PAD=0)");
     }
-    if (replace_function(kGeneratorSlot4, 16, reinterpret_cast<void *>(&generator_slot4),
-                         "NetAnimCmdGenerator slot 4 (PS3 0x453c10)"))
-        installed += 1;
+
+
 }
 
 }  // namespace u2mp

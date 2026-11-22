@@ -280,9 +280,14 @@ void image_widget(uint64_t widget, const float *pos, float alpha, const char *wh
     if (!first_report(key_id, table | 0x100)) return;
     uint64_t name = load<uint64_t>(widget);
     uint64_t mt = material_table(table);
-    log("hud: image %s (widget %s) id %08x table %u (%s) not resolved: %s table %s, %u materials", what,
-        name ? reinterpret_cast<const char *>(name) : "(no name)", id, table, table_name(table), table_name(table),
-        mt ? "set" : "NULL", table_count(mt));
+    if (name >= 0x100000000ULL)
+        log("hud: image %s (widget %s) id %08x table %u (%s) not resolved: %s table %s, %u materials", what,
+            reinterpret_cast<const char *>(name), id, table, table_name(table), table_name(table),
+            mt ? "set" : "NULL", table_count(mt));
+    else
+        log("hud: image %s (widget %llx) id %08x table %u (%s) not resolved: %s table %s, %u materials", what,
+            (unsigned long long)name, id, table, table_name(table), table_name(table),
+            mt ? "set" : "NULL", table_count(mt));
 }
 
 void frame_image(uint64_t set, uint64_t field) {
@@ -845,8 +850,8 @@ float message_line(uint64_t entry, float x, float y, float alpha, float s, bool 
     cx += 10.0f * s;
 
     uint64_t icon = load<uint64_t>(entry + 0x68);
-    uint64_t name = icon ? load<uint64_t>(icon + 0x10) : 0;
-    if (name && *reinterpret_cast<const char *>(name)) {
+    uint64_t name = (icon >= 0x100000000ULL) ? load<uint64_t>(icon + 0x10) : 0;
+    if (name >= 0x100000000ULL && *reinterpret_cast<const char *>(name)) {
         float sx = load<float>(icon + 0x18), sy = load<float>(icon + 0x1c);
         if (sx > 0.0f && sx < 1024.0f && sy > 0.0f && sy < 1024.0f) {
             float k = 0.45f * s;
@@ -1064,7 +1069,7 @@ void markers(uint64_t element) {
     for (int32_t i = 0; i < load<int32_t>(mk) && i < 8; ++i) {
         uint64_t e = mk + 0x10 + 0x40 * uint64_t(i);
         uint32_t type = load<uint32_t>(e + 0x04);
-        if (type >= 32 || !((mask >> type) & 1)) continue;
+        if (type >= 32) continue;
         if (wrap_sub(frame, load<int32_t>(e + 0x3c)) > 300) {
             // Not refreshed for a second: fade it out for good.
             store<float>(e + 0x30, 0.0f);
@@ -1318,11 +1323,11 @@ void weapon_tick() {
     if (weapon != g_weapon.last_weapon) {
         if (weapon && g_weapon.last_weapon) g_weapon.switches += 1;
         g_weapon.last_weapon = weapon;
-        if (weapon) g_weapon.show_until = wrap_add(now, 900);   // 3 seconds
-    }
-    if (weapon && wrap_sub(now, g_weapon.show_until) < 0) {
-        g_weapon.own_shows += 1;
-        guest<ShowWeaponFn>(fShowWeaponHud)(reinterpret_cast<void *>(ctrl), -100.0f);
+        if (weapon) {
+            g_weapon.show_until = wrap_add(now, 900);   // 3 seconds
+            g_weapon.own_shows += 1;
+            guest<ShowWeaponFn>(fShowWeaponHud)(reinterpret_cast<void *>(ctrl), -100.0f);
+        }
     }
 }
 
@@ -1369,7 +1374,6 @@ U2MP_GUEST void multiplayer_draw(void *element_ptr, void *draw_ctx) {
             (unsigned long long)g_weapon.callers[2], (unsigned long long)g_weapon.callers[3],
             (unsigned long long)g_weapon.own_shows, (unsigned long long)g_weapon.panel_draws, flags);
 
-    weapon_tick();
     if (!coop && type != 11 && (flags & 0x40000)) score_panel(set, local, type, team, other);
     coop_panel(set, flags);
     if (load<uint8_t>(abs_of(kNgm) + 0x209c) != 0 && (flags & 0x100000) && !std::getenv("UNCHARTED_U2MP_NO_THEATER"))
@@ -1436,6 +1440,52 @@ void install_weapon_trigger() {
 
 }  // namespace
 
+
+// The HUD element loop calls vtable slot +8 (0x5547a0). A carry-object pickup can leave an
+// element whose slot holds -1; skip it instead of jumping through it.
+unsigned guard_skips;
+U2MP_GUEST void guarded_element_draw(void *element, void *ctx) {
+    const uint64_t vtable = element ? load<uint64_t>(reinterpret_cast<uint64_t>(element)) : 0;
+    const uint64_t fn = vtable ? load<uint64_t>(vtable + 8) : 0;
+    if (!fn || fn == UINT64_MAX || fn < 0x10000) {
+        if (++guard_skips <= 8)
+            log("hud: element draw skipped: element %p vtable %p fn %p", element, reinterpret_cast<void *>(uintptr_t(vtable)),
+                reinterpret_cast<void *>(uintptr_t(fn)));
+        return;
+    }
+    reinterpret_cast<void(U2MP_GUEST *)(void *, void *)>(uintptr_t(fn))(element, ctx);
+}
+
+bool install_hud_element_guard() {
+    constexpr uint64_t site = 0x5547a0, resume = 0x5547a6;
+    static const unsigned char want[] = {0x4c, 0x89, 0xe6, 0xff, 0x50, 0x08};
+    if (!image.executable(site, sizeof want) || !image.matches(site, want, sizeof want)) {
+        log("hud: element draw guard (0x%llx): bytes differ, left alone", (unsigned long long)site);
+        return false;
+    }
+    unsigned char *stub = near_stub(48);
+    if (!stub) return false;
+    size_t n = 0;
+    stub[n++] = 0x48;
+    stub[n++] = 0xb8;
+    const uint64_t fn = uint64_t(uintptr_t(&guarded_element_draw));
+    std::memcpy(stub + n, &fn, 8); n += 8;
+    stub[n++] = 0xff;
+    stub[n++] = 0xd0;
+    stub[n++] = 0xe9;
+    const int64_t back = int64_t(uintptr_t(image.base + resume)) - int64_t(uintptr_t(stub + n + 4));
+    if (back < INT32_MIN || back > INT32_MAX) return false;
+    const int32_t back32 = int32_t(back);
+    std::memcpy(stub + n, &back32, 4); n += 4;
+    const int64_t to_stub = int64_t(uintptr_t(stub)) - int64_t(uintptr_t(image.base + site + 5));
+    if (to_stub < INT32_MIN || to_stub > INT32_MAX) return false;
+    unsigned char patch[6] = {0xe9, 0, 0, 0, 0, 0x90};
+    const int32_t rel = int32_t(to_stub);
+    std::memcpy(patch + 1, &rel, 4);
+    std::memcpy(image.base + site, patch, sizeof patch);
+    log("hud: element draw guard installed (0x5547a0)");
+    return true;
+}
 void install_hud(int &installed) {
     if (!image.base) return;
     if (env_starts_with_zero("UNCHARTED_U2MP_HUD")) {
@@ -1518,6 +1568,9 @@ void install_hud(int &installed) {
     installed += 1;
 
     install_weapon_trigger();
+    // install_hud_element_guard();
 }
+
+void hud_weapon_tick() { weapon_tick(); }
 
 }  // namespace u2mp

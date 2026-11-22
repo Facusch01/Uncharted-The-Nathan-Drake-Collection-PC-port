@@ -41,9 +41,11 @@ struct Game {
 extern Game game;
 
 void install_events(int &installed);
+void install_npcsync(int &installed);
 
 }  // namespace u2mp::events
 
 namespace u2mp {
 using events::install_events;
+using events::install_npcsync;
 }

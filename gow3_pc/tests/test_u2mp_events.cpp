@@ -14,6 +14,9 @@
 namespace u2mp {
 Image image;
 bool Image::matches(uint64_t, const unsigned char *, size_t) const { return false; }
+bool Image::executable(uint64_t, uint64_t) const { return false; }
+unsigned char *near_stub(size_t) { return nullptr; }
+bool retarget_call(uint64_t, uint64_t, void *, const char *) { return false; }
 void log(const char *, ...) {}
 }  // namespace u2mp
 

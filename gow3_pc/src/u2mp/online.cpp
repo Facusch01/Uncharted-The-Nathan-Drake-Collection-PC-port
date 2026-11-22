@@ -1113,6 +1113,7 @@ void on_event(const U2oEvent &e) {
             for (uint32_t i = 0; i < e.room->member_count && i < U2O_MAX_MEMBERS; ++i)
                 connect_member(e.room->members[i], e.room->my_id, match_room_.id);
             publish_blob(match_room_, true);
+            session::online_match_member_joined();
             break;
         }
         // RPCN does not refuse a CLOSED room (it checks only FULL): an invite or a stale list can lead into a
@@ -1180,6 +1181,10 @@ void on_event(const U2oEvent &e) {
         r->members.push_back(Member{e.member->id, npid_text(e.member->npid), e.member->name});
         connect_member(*e.member, r->my_id, r->id);
         if (r == &party_room) publish_blob(party_room, false);   // +0 party room id once the party has 2
+        if (r == &match_room_ && r->owned() && r->lobby_started) {
+            set_state53(*r, 1);   // a joiner can miss the lobby-started flag sent before it joined
+            log("online: custom game room %llx: state 0x53 re-sent after a member joined", (unsigned long long)r->id);
+        }
         break;
     }
     case U2O_EV_MEMBER_LEFT: {
@@ -1214,9 +1219,14 @@ void on_event(const U2oEvent &e) {
         const Member *o = r->member(r->owner_id);
         log("online: %s room %llx updated: owner member %u (%s), flags 0x%x", kind_name(r->kind), (unsigned long long)r->id,
             unsigned(r->owner_id), o ? o->name.c_str() : "?", r->flags);
-        if (old_owner != r->owner_id)
+        if (old_owner != r->owner_id) {
             log("online: room %llx owner changed %u -> %u%s", (unsigned long long)r->id, unsigned(old_owner),
                 unsigned(r->owner_id), r->owned() ? " (this PC now)" : "");
+            if (r == &match_room_ && r->kind == kKindCustom && !migrating && promote_target.empty()) {
+                log("online: the custom match room's host left; ending the session");
+                session::online_host_gone();
+            }
+        }
         break;
     }
     case U2O_EV_MEMBER_UPDATED:
@@ -1705,27 +1715,8 @@ void member_data_changed() {
 // ---- host migration -------------------------------------------------------------------------------
 bool on_host_lost() {
     if (!started || link_state != U2O_READY) return false;
-    const int32_t s = G<int32_t>(kNetState);
-    migrating_match = false;
-    if (in_match || match_running(s)) {
-        if (!session::match_migration_ok()) return false;   // co-op, or not running yet: the match ends (PS3)
-        migrating_match = true;
-    }
-    Room *r = migrating_match && match_room_.id && !match_room_.owned() ? &match_room_ : room_by_id(waiting_room);
-    if (!r) r = party_room.id && !party_room.owned() ? &party_room : match_room_.id && !match_room_.owned() ? &match_room_ : nullptr;
-    if (!r || r->owned()) {
-        migrating_match = false;
-        return false;
-    }
-    migrating = true;
-    migrate_room = r->id;
-    migrate_old_owner = host_npid;
-    if (migrate_old_owner.empty())
-        if (const Member *o = r->member(r->owner_id)) migrate_old_owner = o->npid;
-    migrate_deadline = now() + kMigrateTimeout;
-    log("online: host migration: the host %s left; waiting for the new owner of %s room %llx (NET_SM %d)",
-        migrate_old_owner.c_str(), kind_name(r->kind), (unsigned long long)r->id, s);
-    return true;
+    log("online: host migration disabled: the host left, the session ends");
+    return false;
 }
 
 // ---- promote (PS3 GrantRoomOwner 0x4d3a10; RPCN: owner succession + leave + join again) -------------
@@ -1957,6 +1948,13 @@ void mm_leave() {
 
 int mm_players() { return match_room_.kind == kKindMatchmaking ? int(match_room_.members.size()) : 0; }
 std::string my_npid_text() { return my_npid; }
+
+std::string room_member_name(uint32_t net_id) {
+    for (const Room *r : {&party_room, &match_room_})
+        for (const Member &m : r->members)
+            if (m.id == net_id) return m.name;
+    return {};
+}
 
 std::string npid_at(const net::Address &a) {
     const Peer *p = peer_at(a);

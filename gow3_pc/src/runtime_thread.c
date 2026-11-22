@@ -145,6 +145,13 @@ static void attach(GuestThread *t) {
     set_gs(tcb);
     current=t;
 }
+/* The PS4 runs guest code with flush-to-zero and denormals-are-zero; the host default lets a fade
+ * stop at the smallest denormal and blinds the co-op NPCs' vision tests. */
+static void guest_fpu(void) {
+    const unsigned mxcsr=0x9fc0;
+    const unsigned short x87=0x037f;
+    __asm__ volatile("ldmxcsr %0\n\tfldcw %1"::"m"(mxcsr),"m"(x87));
+}
 static GuestThread *new_thread(void) {
     GuestThread *t=calloc(1,sizeof(*t));
     if (!t) return NULL;
@@ -196,6 +203,7 @@ static int profile_guest_wanted(const char *name) {
 void runtime_thread_attach_main(void) {
     GuestThread *t=runtime_thread_current();
     snprintf(t->name,sizeof(t->name),"main");
+    guest_fpu();
 #ifdef _WIN32
     extern void gow3_profile_current(const char *name);
     if (profile_guest_wanted(t->name)) gow3_profile_current(t->name);
@@ -369,6 +377,7 @@ static void apply_guest_scheduling(GuestThread *t,HANDLE h,const char *why) {
 static void *host_start(void *p) {
     GuestThread *t=p;
     attach(t);
+    guest_fpu();
     set_host_name(t->name);
 #ifdef _WIN32
     runtime_thread_widen_stack_limit();

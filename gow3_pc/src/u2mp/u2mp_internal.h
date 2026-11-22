@@ -60,6 +60,7 @@ void install_menus(int &installed);     // menus.cpp: the multiplayer menu queri
 void install_menuimages(int &installed); // menuimages.cpp: net image ids, lost menu image types (MENUS.md 7)
 void install_unlocks(int &installed); // unlocks.cpp: every MP item unlocked, GOTY skin/booster tables (UNLOCKS.md)
 void install_loading(int &installed);  // loading.cpp: PS3 match loading screen (PORT-FRONTEND4.md)
+void loading_hide(const char *why);
 void install_dlc(int &installed);       // dlc.cpp: DLC maps offered only when imported (u2mp/docs/DLC.md)
 void install_menudraw(int &installed);  // menudraw.cpp: 2D command arena 192 KiB -> 2 MiB (PORT-MENUDRAW.md)
 void install_frontend2(int &installed); // frontend2.cpp: partial menu functions vs PS3 (PORT-FRONTEND2.md)
@@ -72,13 +73,18 @@ void install_gameplay2(int &installed); // gameplay2.cpp: connection event Appli
 void install_visibility(int &installed); // visibility.cpp: PS3 KickVisibilityJob 0x494c38 (PORT-GAMEPLAY3.md 7)
 void install_scripttime(int &installed); // scripttime.cpp: net-timer track-group delta (PORT-SCRIPTTIME.md)
 void install_hud(int &installed);       // hud.cpp: multiplayer HUD draw, PS3 0x8aef68 (PORT-HUD.md)
+void install_medals(int &installed);    // medals.cpp: default icon for medals net.pak lacks
+void hud_weapon_tick();                 // hud.cpp: weapon panel trigger, from the frame (not the HUD draw)
 void install_scoreboard(int &installed); // scoreboard.cpp: in-match scoreboard, PS3 0x4cbf00 / 0x4cbc10
+void show_round_results();               // scoreboard.cpp: round/end results page from the session state
 void install_rosternames(int &installed); // rosternames.cpp: player display names in the team lists (NetStatGame +0x3918)
 void install_matchend(int &installed); // matchend.cpp: match-end watch, test time limit (PORT-GAMEPLAY3.md 6)
 void install_solocoop(int &installed); // solocoop.cpp: co-op minimum players 2 -> 1
 void install_gameplay3(int &installed); // gameplay3.cpp: ShowResults::Enter + results countdown (PORT-GAMEPLAY3.md)
 void install_nullsites(int &installed); // nullsites.cpp: replay stream fallback at WaitReady::Exit (PORT-NULLSITES.md)
 void install_netpatch(int &installed);  // netpatch.cpp: the PS3 server live-data module net-patch9 (PORT-NETPATCH.md)
+void install_tier2(int &installed);     // tier2.cpp: event/data fallbacks that need the loaded game data
+bool tier2_patch_weapon_damage();        // tier2.cpp: retry until the weapon table is loaded
 int netpatch_load();                    // netpatch.cpp: bind net-patch9's symbols (idempotent); when MP is entered
 // False when the *net-games* record `index` plays on a DLC map whose map pack was not imported.
 bool dlc_net_game_available(int32_t index);

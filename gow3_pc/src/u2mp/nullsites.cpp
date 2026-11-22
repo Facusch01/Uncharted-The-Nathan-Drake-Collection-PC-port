@@ -91,32 +91,50 @@ bool install_stream_start() {
 // The Fort reached Playing, then NetGameManager::Update (0x63e782 -> 0x66c4a0) asserted in
 // GetAllocator 0xb2f280 ("pAllocator->BP_GetAllocatorTypeForDebug() == ...HeapAllocator",
 // corelib/memory/allocator-heap.cpp) for context 0x45. On PS4 that context resolves to a non-heap
-// allocator on the game thread. The two callers (calls at 0x66d413 and 0x66d510) only take the heap's
-// HeapArena (+0x50) as scratch space for a sort: 0x6700c0 sorts into [current, stack) and writes
-// `current` back unchanged (0x6701f0). Both calls get an allocator stand-in whose arena covers a
-// buffer of our own: {current, stack, memory, info = size << 2 | 2 (external modification allowed)}.
+// allocator on the game thread. Callers take the heap's HeapArena (+0x50) as scratch space for a
+// sort: 0x6700c0 sorts into [current, stack) and writes `current` back unchanged (0x6701f0).
+// GetAllocator answers context 0x45 with our stand-in and keeps its own behaviour for every other
+// context: {current, stack, memory, info = size << 2 | 2 (external modification allowed)}.
 constexpr uint64_t fGetAllocator = 0xb2f280;
-constexpr uint64_t cScratchCalls[] = {0x66d413, 0x66d510};
-constexpr size_t kScratchBytes = 0x40000;
+constexpr size_t kScratchBytes = 1 << 20;
 alignas(64) unsigned char scratch_memory[kScratchBytes];
 struct ScratchHeap {
     uint64_t head[10];   // allocator object up to +0x50 (not read by these callers)
     uint64_t current, stack, memory, info;
-} scratch_heap;
+};
+alignas(64) ScratchHeap scratch_heap;
 
-U2MP_GUEST void *scratch_allocator(const uint32_t *context) {
-    static bool said = false;
-    if (!said) {
-        said = true;
-        log("scratch heap: context 0x%x for the net player sort gets a %zu KiB arena of its own",
-            context ? *context : 0u, kScratchBytes / 1024);
-    }
+bool install_scratch_allocator() {
+    static const unsigned char prologue[6] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57};
+    if (!image.executable(fGetAllocator, sizeof prologue)) return false;
+    if (!image.matches(fGetAllocator, prologue, sizeof prologue)) return image.base[fGetAllocator] == 0xe9;
+    unsigned char *stub = near_stub(64);
+    if (!stub) return false;
     const uint64_t base = uint64_t(uintptr_t(scratch_memory));
     scratch_heap.current = base;
     scratch_heap.stack = base + kScratchBytes;
     scratch_heap.memory = base;
     scratch_heap.info = (uint64_t(kScratchBytes) << 2) | 2;
-    return &scratch_heap;
+    size_t n = 0;
+    static const unsigned char cmp45[] = {0x81, 0x3f, 0x45, 0x00, 0x00, 0x00, 0x75, 0x0b};
+    std::memcpy(stub + n, cmp45, sizeof cmp45); n += sizeof cmp45;
+    stub[n++] = 0x48; stub[n++] = 0xb8;
+    const uint64_t allocator = uint64_t(uintptr_t(&scratch_heap));
+    std::memcpy(stub + n, &allocator, 8); n += 8;
+    stub[n++] = 0xc3;
+    std::memcpy(stub + n, prologue, sizeof prologue); n += sizeof prologue;
+    stub[n++] = 0xff; stub[n++] = 0x25; stub[n++] = 0; stub[n++] = 0; stub[n++] = 0; stub[n++] = 0;
+    const uint64_t back = uint64_t(uintptr_t(image.base + fGetAllocator + sizeof prologue));
+    std::memcpy(stub + n, &back, 8); n += 8;
+    const int64_t delta = int64_t(uintptr_t(stub)) - int64_t(uintptr_t(image.base + fGetAllocator + 5));
+    if (delta < INT32_MIN || delta > INT32_MAX) return false;
+    unsigned char patch[6] = {0xe9, 0, 0, 0, 0, 0x90};
+    const int32_t relative = int32_t(delta);
+    std::memcpy(patch + 1, &relative, 4);
+    std::memcpy(image.base + fGetAllocator, patch, sizeof patch);
+    log("scratch heap: context 0x45 for the net player sort gets a %zu KiB arena of its own",
+        kScratchBytes / 1024);
+    return true;
 }
 
 }  // namespace
@@ -126,10 +144,7 @@ void install_render(int &installed);   // render.cpp: cbuffer list guard, entry 
 void install_nullsites(int &installed) {
     if (install_stream_start()) ++installed;
     install_render(installed);
-    for (uint64_t call : cScratchCalls)
-        if (retarget_call(call, fGetAllocator, reinterpret_cast<void *>(&scratch_allocator),
-                          "scratch heap (context 0x45, net player sort)"))
-            ++installed;
+    if (install_scratch_allocator()) ++installed;
 }
 
 }  // namespace u2mp

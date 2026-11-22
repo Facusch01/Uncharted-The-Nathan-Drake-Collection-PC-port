@@ -22,4 +22,11 @@ const char *unlocks_text(uint32_t id);
 // since the player data message sends skins by position (session.cpp compares it at join).
 uint32_t unlocks_skin_fingerprint();
 
+// The local player's chosen hero and villain actor packages, NULL until a choice is applied.
+const char *unlocks_local_skin();
+const char *unlocks_local_villain();
+
+// Re-applies each net slot's character index and the local slot's art to the 10-entry per-slot table.
+void unlocks_apply_slot_skins();
+
 }  // namespace u2mp

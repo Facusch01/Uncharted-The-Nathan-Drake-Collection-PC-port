@@ -243,10 +243,20 @@ void close_playback() {
 // Recording.
 
 void record(void *event) {
+    static thread_local bool entering = false;
+    if (entering) {
+        static bool said = false;
+        if (!said) {
+            said = true;
+            log("cinema: nested network event recording skipped");
+        }
+        return;
+    }
     if (!g_recording || !event) return;
     Stream *s = stream();
     if (s->data != buffer_words()) return;
     if ((s->bits + 7u) / 8u > kRecordLimit) return;
+    entering = true;
     BitStream b{s->data, s->bits, s->max_bits, 0};
     const uint32_t clock = frame_clock();
     write_bits(b, clock ? clock : 1, 32);   // time 0 marks the end of the stream
@@ -255,7 +265,15 @@ void record(void *event) {
     // The event serializes its own payload into the same stream.
     const uint64_t vtable = get64(static_cast<const uint8_t *>(event));
     const uint64_t write = get64(reinterpret_cast<const uint8_t *>(uintptr_t(vtable)) + 0x18);
+    static bool first_state = true;
+    const bool probe = first_state && static_cast<const uint8_t *>(event)[8] == 0x0c;
+    if (probe) log("cinema: player state record begin");
     reinterpret_cast<void(U2MP_GUEST *)(void *, void *)>(uintptr_t(write))(event, s);
+    if (probe) {
+        first_state = false;
+        log("cinema: player state record end");
+    }
+    entering = false;
 }
 
 void finish_recording() {

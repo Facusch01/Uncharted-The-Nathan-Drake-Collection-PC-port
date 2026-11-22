@@ -26,6 +26,8 @@ constexpr uint64_t kTrackerStride = 0x2c0;
 constexpr int kTrackerCount = 10;
 
 constexpr uint64_t kStatTables[2] = {0x1147bd8, 0x114d2ec};
+constexpr uint64_t kStatTable = 0x1147bd0;   // NetStatGame's table base (0x66c600 takes this)
+constexpr uint64_t kBuildStats = 0x66c600;
 constexpr uint64_t kRecordStride = 0x80;
 constexpr uint64_t kRecordNick = 0x38f8;
 constexpr uint64_t kRecordDisplay = 0x3918;
@@ -66,10 +68,27 @@ void fill_names() {
     }
 }
 
+// The loading screen's team lists read NetStatGame. The host builds it when the match starts;
+// a joiner does not, so its two lists stay empty. Rebuild it once from the slots it has.
+void ensure_stat_table() {
+    static bool tried = false;
+    const unsigned char *table = image.at<unsigned char>(kStatTables[0]);
+    uint32_t count = 0;
+    std::memcpy(&count, table, sizeof count);
+    if (count || tried) return;
+    tried = true;
+    log("rosternames: NetStatGame table empty; rebuilding it from the slots");
+    using BuildFn = void(U2MP_GUEST *)(void *);
+    reinterpret_cast<BuildFn>(image.base + kBuildStats)(image.base + kStatTable);
+    std::memcpy(&count, table, sizeof count);
+    log("rosternames: NetStatGame table rebuilt with %u record(s)", count);
+}
+
 using ListFn = uint64_t(U2MP_GUEST *)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
 U2MP_GUEST uint64_t row_build_hook(uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t e, uint64_t f) {
     fill_names();
+    ensure_stat_table();
     return reinterpret_cast<ListFn>(image.base + kRowBuild)(a, b, c, d, e, f);
 }
 
