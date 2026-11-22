@@ -3293,7 +3293,13 @@ void Rasterizer::NoteEffectDispatch(const Shader::Info& cs, u32 groups) {
         }
         return false;
     }();
-    if (!enabled || cs.buffers.empty() || cs.buffers[0].IsSpecial() || cs.user_data.size() < 4) {
+    // gow3 22 Nov 2026: the user data this dispatch was recorded with (the draw recording thread's
+    // snapshot), as GetSharp reads it. The live registers used before belong to a dispatch the GPU
+    // command thread decoded later: a U3 host's device-loss list showed each dispatch with the
+    // vertex count of one 0 to 3 dispatches on (3287 vertices over 1118 records), while its groups
+    // matched its own records in all 32 entries.
+    const auto ud = cs.UserData();
+    if (!enabled || cs.buffers.empty() || cs.buffers[0].IsSpecial() || ud.size() < 4) {
         return;
     }
     EffectDispatch d{};
@@ -3303,7 +3309,7 @@ void Rasterizer::NoteEffectDispatch(const Shader::Info& cs, u32 groups) {
     d.base = sharp.base_address;
     d.num_records = sharp.num_records;
     d.stride = sharp.GetStride();
-    const VAddr counts_ptr = (VAddr(cs.user_data[3]) << 32 | cs.user_data[2]) & 0xFFFFFFFFFFFFULL;
+    const VAddr counts_ptr = (VAddr(ud[3]) << 32 | ud[2]) & 0xFFFFFFFFFFFFULL;
     if (counts_ptr && IsMapped(counts_ptr, 4)) {
         memory->CopySparseMemory(counts_ptr, reinterpret_cast<u8*>(&d.vertices), 4);
     }
@@ -3325,6 +3331,18 @@ void Rasterizer::NoteEffectDispatch(const Shader::Info& cs, u32 groups) {
     d.sequence = sequence;
     g_effect_dispatches[sequence % g_effect_dispatches.size()] = d;
     g_effect_dispatch_count.store(sequence + 1, std::memory_order_release);
+    // A vertex count past buffer 0's records would read past its end (none seen so far).
+    if (d.vertices > d.num_records) {
+        static u32 overruns = 0;
+        if (overruns < 16) {
+            ++overruns;
+            std::printf("Effect shader: cs %08llx dispatch over %u vertices, buffer 0 at %#llx has "
+                        "%u records (stride %u)\n",
+                        static_cast<unsigned long long>(d.hash), d.vertices,
+                        static_cast<unsigned long long>(d.base), d.num_records, d.stride);
+            std::fflush(stdout);
+        }
+    }
     if (d.max_count > 4096) {
         static u32 reports = 0;
         if (reports < 16) {

@@ -47,8 +47,19 @@
 #endif
 
 namespace Vulkan {
+void DumpGpuCheckpoints(const Instance& instance); // vk_scheduler.cpp
+void DumpDeviceFault(const Instance& instance);
 
 namespace {
+/// gow3 22 Nov 2026: a lost device seen by a frame wait reports what the GPU was doing before
+/// the assertion stops the port (or waits until another thread's report is complete).
+void ReportDeviceLost(const Instance& instance, vk::Result result) {
+    if (result == vk::Result::eErrorDeviceLost) {
+        DumpGpuCheckpoints(instance);
+        DumpDeviceFault(instance);
+    }
+}
+
 /// gow3 20 Oct 2026: presents on their own queue (Instance::SeparatePresentQueue) take that
 /// queue's lock only; on the graphics queue the submit lock, as before.
 std::mutex& PresentLock(const Instance& instance) {
@@ -316,6 +327,7 @@ Frame* Presenter::PrepareLastFrame() {
         if (result == vk::Result::eTimeout) {
             continue;
         }
+        ReportDeviceLost(instance, result);
         ASSERT_MSG(result != vk::Result::eErrorDeviceLost,
                    "Device lost during waiting for a frame");
     }
@@ -1267,6 +1279,7 @@ Frame* Presenter::GetRenderFrame() {
 
     // Wait for the presentation to be finished so all frame resources are free
     while (wait() != vk::Result::eSuccess) {
+        ReportDeviceLost(instance, result);
         ASSERT_MSG(result != vk::Result::eErrorDeviceLost,
                    "Device lost during waiting for a frame");
         // Retry if the waiting times out

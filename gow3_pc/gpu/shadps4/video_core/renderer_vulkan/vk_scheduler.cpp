@@ -590,8 +590,18 @@ std::function<void(u64)> g_describe_gpu_address;
 void (*g_device_lost_report)() = nullptr;
 void DescribeBoundAddress(u64 address);
 void DumpDeviceFault(const Instance& instance) {
-    static std::atomic<bool> reported{false};
-    if (g_device_lost_report && !reported.exchange(true)) {
+    // gow3 22 Nov 2026 (U3 host crash at a late join): several threads see a lost device at once
+    // (frame waits, semaphore waits, submits). The first writes the report; the others wait here
+    // until it is complete and add nothing, so the assertion that stops the port cannot cut it
+    // short. That crash's log ended after the effect-shader list, without the driver's fault
+    // address: the frame wait's assertion had exited while another thread was still reporting.
+    // The wait is bounded (5 s) in case the driver never returns the report.
+    static std::timed_mutex report_mutex;
+    static bool reported = false;
+    std::unique_lock report_lock{report_mutex, std::chrono::seconds(5)};
+    if (!report_lock.owns_lock() || reported) return;
+    reported = true;
+    if (g_device_lost_report) {
         g_device_lost_report();
     }
     if (!instance.HasDeviceFault()) return;
