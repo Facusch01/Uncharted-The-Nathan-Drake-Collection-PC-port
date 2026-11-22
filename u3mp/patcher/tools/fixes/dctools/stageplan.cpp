@@ -1463,7 +1463,27 @@ Plan make_plan(const fs::path &ps3path, const fs::path &res, const fs::path &wat
                 if (!best || std::make_pair(score2, -int64_t(c.size)) > std::make_pair(best->score2, best->negsz)) best = Best{score2, -int64_t(c.size), &k, &c};
             }
         }
-        if (!best) throw Stop("no fallback material for " + n);
+        if (!best) {
+            // why no template was left: the survey in memory and what each test turned away (a player's import failed
+            // here on every map with a survey equal to a working one, 2026-11-22)
+            size_t keys = 0, pinned = 0, shadow = 0, ik = 0, ents = 0, excluded = 0, not_prime = 0;
+            const auto pin = pins.find(n);
+            for (const SKey &k : S->keys) {
+                keys++;
+                if (pin != pins.end() && k.k != pin->second) { pinned++; continue; }
+                if (!g_u2 && k.shadowblocker != shadow_only_name(n)) { shadow++; continue; }
+                if (!g_u2 && has(k.k, "ik-only") != has(n, "ik-only")) { ik++; continue; }
+                for (const SEnt &c : k.ents) {
+                    ents++;
+                    if (exclude.count(c.pak)) excluded++;
+                    else if (!(g_u2 ? c.m->u2bg : c.m->prime)) not_prime++;
+                }
+            }
+            throw Stop(fmt("no fallback material for %s (survey %zu materials, %zu keys; turned away: pinned %zu, shadow %zu, "
+                           "ik %zu; entries %zu, excluded %zu, not prime %zu; shadow-only name %d, pinned to %s, u2 %d)",
+                           n.c_str(), S->mats.size(), keys, pinned, shadow, ik, ents, excluded, not_prime,
+                           int(shadow_only_name(n)), pin == pins.end() ? "-" : pin->second.c_str(), int(g_u2)));
+        }
         PlanMat e = plan_mat(n, *best->c, best->k->k, false);
         e.has_roles = true;
         for (const char *r : {"blend", "color", "detail", "env", "mask", "normal", "spec", "trans"})

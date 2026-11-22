@@ -372,7 +372,11 @@ Bytes build(const Row &row, const std::map<std::pair<std::string, std::string>, 
     if (const json::Value *g = ov.get("gobo"); g && g->truthy()) o.gobo = g;
     // 'templates': {PS3 material: retail template key} the owner approved for a material (kept by the planner)
     if (const json::Value *t = ov.get("templates"))
-        for (const auto &[k, v] : t->fields) o.pins[k] = v.s;   // (ASCII names)
+        for (const auto &[k, v] : t->fields)   // (ASCII names)
+            // only the current form, a template key string: the recovered choices removed in 588f910 held [pak, key]
+            // lists, and an install updated by hand or from before installed-files.txt can still have those files; read
+            // as a pin to "" they turned every template away ("no fallback material" on every map, 2026-11-22)
+            if (v.kind == json::Value::String && !v.s.empty()) o.pins[k] = v.s;
     // a '<map>-multi' level leaves its emblem triangles to the wall-emblem actors (built here from the finished level
     // when this row is the one the game loads)
     o.emblem_walls = wallemblem::emblem_level(row.at("name"));
