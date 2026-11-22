@@ -73,7 +73,7 @@ Quality (2026-11-08):
 - `0x8cf8e1cc` (and its 5 strings) use learned layouts: `weapon-set` learned from 25 instances, 0 failures.
 
 Import: step net-patch (after the spawn paks): source `<title>DATA2/USRDIR/net-patch9.bin`
-searched like `ps3_data_pak22` (`--ps3-data`, NPUA80698DATA2 first, then any DATA2), output
+searched like `ps3_data_pak22` (the `--dns` download, `--ps3-data`, NPUA80698DATA2 first, then any other DATA2), output
 `u2data/build/main/dc1/ps4/net-patch9.bin`, schema cached in `work/dc`. First run learns the schema (~3 min).
 Test import written to `scratch/u2mp/import-test/u2data/build/main/dc1/ps4/net-patch9.bin` (190918 bytes).
 

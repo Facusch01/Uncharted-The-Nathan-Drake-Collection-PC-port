@@ -301,8 +301,10 @@ Test run (2026-11-07, `--only mp-hero`, 49 skins):
   photos); none of them is named by the PS4 dc, the PS4 executable, the GOTY dc or the GOTY net-patch9, so the
   GOTY copy is used (since 2026-11-08; earlier runs had 107).
 * **Multiplayer spawners** (`<map>-pak-ingame10.pak`, registered as level `<map>-pak`) and **net-patch9.bin**
-  (the server live-data DC module): from a PS3 `*DATA2` folder (`--ps3-data`, else the GOTY `NPUA80698DATA2`, else
-  any other). The spawn paks were downloaded from the PS3 server and are byte-identical in BCUS98123DATA2 and
+  (the server live-data DC module): from the server download (`--dns`), else a PS3 `*DATA2` folder: `--ps3-data`
+  itself when it is one, else the GOTY `NPUA80698DATA2`, and only when that has none another release's (sorted). The
+  folder name order never puts BCES/BCUS before the GOTY: net-patch9 sets the skin table order every PC of a match
+  must share. The import log names the folder (`net-patch9: from ...`, `net spawn paks: from ...`). The spawn paks were downloaded from the PS3 server and are byte-identical in BCUS98123DATA2 and
   BCES00757DATA2 (version-independent server data); GOTY's own data folder has none because the server is off.
   12 converted, `stage-multi-pak-ingame10` stays PS4.
 * **DLC Ruins**: map pack 1 ships another `ruins-multi` (78 MB main pak, DLC `-ingame10` with the heli and plank

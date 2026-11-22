@@ -231,20 +231,6 @@ std::vector<Row> read_list(const fs::path &path) {
     return rows;
 }
 
-// the folder name of a PS3 title (4 capitals and 5 digits), the last one in the path
-std::string title_id(const std::string &path) {
-    std::string p = S(fs::absolute(P(path)));
-    std::replace(p.begin(), p.end(), '\\', '/');
-    const auto parts = split(p, '/');
-    for (auto it = parts.rbegin(); it != parts.rend(); ++it) {
-        const std::string &x = *it;
-        if (x.size() == 9 && std::all_of(x.begin(), x.begin() + 4, [](char c) { return c >= 'A' && c <= 'Z'; }) &&
-            std::all_of(x.begin() + 4, x.end(), [](char c) { return c >= '0' && c <= '9'; }))
-            return x;
-    }
-    return "";
-}
-
 std::vector<std::string> listdir_sorted(const fs::path &d) {
     std::vector<std::string> v;
     std::error_code ec;
@@ -1029,47 +1015,60 @@ void Importer::ensure_data2(const std::string &elf) {
     lg("game data: the download gave no usable folder (" + cut(failed, 500) + "); using what is on this PC");
 }
 
-// --ps3-data as given, plus (when it is RPCS3's dev_hdd0/game or holds <id>DATA2 folders) the title's own DATA2 folder
-// first and then the other DATA2 folders in it
+// The DATA2 folders in `base`: the GOTY's NPUA80698DATA2 first, then every other title's (other regions) sorted.
+// net-patch9.bin defines the skin table every PC of a match must share, so the GOTY's copy wins whenever it is
+// there; the folder name order (BCES... before NPUA...) never decides.
+std::vector<fs::path> data2_folders(const fs::path &base) {
+    std::vector<fs::path> v;
+    if (!isdir(base)) return v;
+    if (isdir(base / DATA2_ID)) v.push_back(base / DATA2_ID);
+    for (const std::string &x : listdir_sorted(base))
+        if (ends(upper(x), "DATA2") && upper(x) != DATA2_ID && isdir(base / P(x))) v.push_back(base / P(x));
+    return v;
+}
+
+// --ps3-data as given, plus (when it is RPCS3's dev_hdd0/game or holds <id>DATA2 folders) its DATA2 folders, GOTY first
 std::vector<fs::path> Importer::ps3_data_roots() {
     std::vector<fs::path> roots;
     const fs::path d = P(a.ps3_data);
     if (a.ps3_data.empty() || !isdir(d)) return roots;
     roots.push_back(d);
-    const std::string title = title_id(a.ps3);
-    for (const fs::path &base : {d, d / "game", d / "dev_hdd0" / "game"}) {
-        if (!isdir(base)) continue;
-        std::vector<std::string> subs;
-        for (const std::string &x : listdir_sorted(base))
-            if (ends(upper(x), "DATA2") && isdir(base / P(x))) subs.push_back(x);
-        if (!title.empty() && std::find(subs.begin(), subs.end(), title + "DATA2") != subs.end()) roots.push_back(base / P(title + "DATA2"));
-        for (const std::string &x : subs)
-            if (x != title + "DATA2") roots.push_back(base / P(x));
-    }
+    for (const fs::path &base : {d, d / "game", d / "dev_hdd0" / "game"})
+        for (const fs::path &x : data2_folders(base)) roots.push_back(x);
     return roots;
 }
 
-// the downloaded game data (ensure_data2), the data roots, then (from the PS3 folders up to dev_hdd0/game) the title's
-// DATA2 folder and every other DATA2 folder
+// the downloaded game data (ensure_data2), the data roots, then (from the PS3 folders up to dev_hdd0/game) its DATA2
+// folders, GOTY first
 std::vector<fs::path> Importer::ps3_data_candidates() {
     std::vector<fs::path> cands;
     if (!data2.empty()) cands.push_back(data2);
     for (const fs::path &r : ps3_data_roots()) cands.push_back(r);
-    const std::string title = title_id(a.ps3);
     for (const std::string &root : {a.ps3_dlc, a.ps3}) {
         if (root.empty()) continue;
         fs::path p = fs::absolute(P(root));
         for (int i = 0; i < 6; i++) {
             if (lower(S(p.filename())) == "game") {
-                if (!title.empty()) cands.push_back(p / P(title + "DATA2"));
-                for (const std::string &x : listdir_sorted(p))
-                    if (ends(upper(x), "DATA2")) cands.push_back(p / P(x));
+                for (const fs::path &x : data2_folders(p)) cands.push_back(x);
                 break;
             }
             p = p.parent_path();
         }
     }
     return cands;
+}
+
+// Names where a game-data file came from, for the log: the GOTY's data, another title's (region's) data or a folder
+// given as is. Every PC of a match must use the same net-patch9.bin, so a non-GOTY source is called out.
+std::string data2_source(const fs::path &file) {
+    for (fs::path p = file.parent_path(); !p.empty() && p != p.parent_path(); p = p.parent_path()) {
+        const std::string n = upper(S(p.filename()));
+        if (n == DATA2_ID) return n + " (the GOTY's game data)";
+        if (ends(n, "DATA2"))
+            return n + " (another release's game data: " + DATA2_ID +
+                   " has none; other PCs of a match may have different data)";
+    }
+    return S(file.parent_path()) + " (as given)";
 }
 
 // pak22 of the PS3 game-data folder: the maps' spawn packages the game downloads when it goes online (the import's own
@@ -1103,7 +1102,7 @@ void Importer::net_spawn_paks() {
     if (d)
         for (const std::string &f : listdir_sorted(*d))
             if (ends(f, "-pak-ingame10.pak")) found.push_back(f);
-    if (d) lg("net spawn paks: from " + S(*d) + " (server map data, the same for every PS3 version)");
+    if (d) lg("net spawn paks: from " + S(*d) + ", " + data2_source(*d / "pak"));
     else lg("net spawn paks: no PS3 game-data folder with <map>-pak-ingame10.pak (set --dns or --ps3-data): multiplayer maps have no player spawners");
     for (const std::string &f : found) {
         // optional "<digits>-" in front, then "<level>-pak-ingame10.pak"
@@ -1158,6 +1157,7 @@ void Importer::net_patch() {
         lg("MISSING " + key + ": no PS3 game-data folder with net-patch9.bin (set --dns, or start the PS3 GOTY once in RPCS3 and set --ps3-data): match start asserts on weapon set 0x8cf8e1cc");
         return;
     }
+    lg("net-patch9: from " + S(*src) + ", " + data2_source(*src));
     std::string src_sha;
     if (sha1_memo_get(*src, src_sha) && done_before(key, src_sha) && text_of(item(key)->get("dc")) == NETPATCH_VERSION) return;
     const Bytes data = read_bytes(*src);
