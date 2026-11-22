@@ -116,7 +116,11 @@ template <typename RowText> void plain_list(uint8_t *q, int32_t count, int32_t &
     case 4: put<int32_t>(q + 4, count == 0 ? -1 : (cur < count ? cur : count - 1)); break;
     case 5: put<int32_t>(q + 4, count - 1); break;
     case 7: put<int32_t>(q + 4, 1); break;
-    case 8: cur = 0; break;
+    case 8:
+        if (count <= 0) cur = -1;
+        else if (cur < 0) cur = 0;
+        else if (cur >= count) cur = count - 1;
+        break;
     case 9: cur = get<int32_t>(q + 4); break;
     default: break;
     }
@@ -433,6 +437,12 @@ U2MP_GUEST void query_friends(uint8_t *q) {
             set_text(q, title_text);
             return;
         }
+        static int traced = 0;
+        if (traced < 96) {
+            log("friends query: op %u row %d cur %d rows %d", op_of(q), get<int32_t>(q + 4), friends_cur,
+                n == 0 ? 2 : 1 + n);
+            ++traced;
+        }
         plain_list(q, n == 0 ? 2 : 1 + n, friends_cur, [n](int32_t r) -> const char * {
             if (r == 0) return "Browse Online Games";
             if (n == 0) return "No RPCN friends yet. Add friends in the launcher.";
@@ -461,6 +471,11 @@ U2MP_GUEST void query_friends(uint8_t *q) {
 U2MP_GUEST void query_join_list(uint8_t *q) {
     const int rows = online::join_rows();
     if (rows >= 0) {
+        static int traced = 0;
+        if (traced < 96) {
+            log("join query: op %u row %d cur %d rows %d", op_of(q), get<int32_t>(q + 4), join_cur, rows);
+            ++traced;
+        }
         if (op_of(q) == 1)
             set_text(q, online::join_title());
         else
