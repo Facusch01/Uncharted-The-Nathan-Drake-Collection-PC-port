@@ -159,6 +159,7 @@ struct Machine {
     bool ready_sent = false;
     bool created = false;
     uint32_t gather_start = 0;
+    int gather_players = 0;
     uint32_t ready_bits = 0;     // bit n: transport slot n said it is ready
     uint32_t next_tip = 0;
     int32_t logged_sm = -1;      // NET_SM the last log line showed
@@ -217,6 +218,7 @@ void begin(bool host) {
     const uint32_t now = clock_now();
     m.running = true;
     m.gather_start = now;
+    m.gather_players = session::member_count();
     m.ready_bits = 1;   // slot 0, the host itself, counts as ready from the start
     m.next_tip = now + kTipPeriod;
     clear_vote();
@@ -319,6 +321,7 @@ void end_vote() {
 void leave(bool tell) {
     if (tell) session::send_message(reply_target(), {kMsgLeave});
     log("matchmaking: leaving%s", tell ? "" : " (the party left)");
+    put<uint8_t>(kNetInfo + kInfoError, 0);
     online::mm_leave();
     clear_vote();
     set_phase(0);
@@ -386,7 +389,8 @@ int matchmaking_min_players() {
     }();
     if (forced) return forced;
     std::vector<int32_t> types;
-    bool coop_only = playlist_game_types(types);
+    if (!playlist_game_types(types) || types.empty()) return 2;
+    bool coop_only = true;
     for (const int32_t t : types) coop_only = coop_only && (t == 4 || t == 8 || t == 9 || t == 12);
     return coop_only ? 1 : 2;
 }
@@ -400,14 +404,16 @@ void host_start_matchmaking_step() {
     case online::kMmIdle:
         if (int32_t(clock_now() - m.retry_at) >= 0) {
             const uint32_t playlist = get<uint32_t>(kNetPlayerData + kPlaylistId);
-            log("matchmaking: looking for players online (playlist 0x%x)", playlist);
-            online::mm_begin(playlist);
+            const int32_t index = playlist_index(playlist);
+            log("matchmaking: looking for players online (playlist 0x%x, index %d)", playlist, index);
+            online::mm_begin(playlist, uint32_t(index >= 0 ? index : 0));
         }
         break;
     case online::kMmHosting: {
         m.online_room = true;
         const uint32_t now = clock_now();
         m.gather_start = now;
+        m.gather_players = session::member_count();
         m.research_at = now + kResearchMin + uint32_t(std::rand() % 15) * 300;
         set_net_sm(kSmServerLobby);
         break;
@@ -427,13 +433,21 @@ void host_gather_step() {
     const uint32_t now = clock_now();
     const int ready = std::popcount(m.ready_bits);
     const uint32_t waited = now - m.gather_start;
-    if (m.online_room) {
-        const int players = session::member_count();
-        const int minimum = matchmaking_min_players();
-        if (players >= 10 ||
-            (players >= minimum && ((waited >= kOnlineGather && ready >= players) || waited >= kOnlineGatherMax))) {
-            start_vote();
-        } else if (players < minimum && int32_t(now - m.research_at) >= 0) {
+    const int players = session::member_count();
+    const int minimum = matchmaking_min_players();
+    if (players != m.gather_players) {
+        if (players > m.gather_players) {
+            m.gather_start = now;
+            log("matchmaking: %d player(s) joined: gather timer restarted", players);
+        }
+        m.gather_players = players;
+    }
+    if (players < minimum) {
+        if (!m.online_room && online::mm_online()) {
+            log("matchmaking: %d player(s) after %u s: searching again", players, waited / 300);
+            m.retry_at = now;
+            set_net_sm(kSmStartMatchmaking);
+        } else if (m.online_room && int32_t(now - m.research_at) >= 0) {
             log("matchmaking: %d player(s) after %u s: looking for another room", players, waited / 300);
             online::mm_research();
             m.online_room = false;
@@ -441,7 +455,11 @@ void host_gather_step() {
         }
         return;
     }
-    if (waited >= kGatherMax || (waited >= kGatherMin && ready >= session::member_count())) start_vote();
+    if (m.online_room) {
+        if (players >= 10 || (waited >= kOnlineGather && ready >= players) || waited >= kOnlineGatherMax) start_vote();
+        return;
+    }
+    if (waited >= kGatherMax || (waited >= kGatherMin && ready >= players)) start_vote();
 }
 
 void host_vote_step() {

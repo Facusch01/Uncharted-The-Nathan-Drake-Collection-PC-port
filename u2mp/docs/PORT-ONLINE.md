@@ -50,14 +50,23 @@ events (`gamenet.cpp`) and voice ride on it. Online changes only two things:
 | Room | Made when | maxSlot / flags | Attributes (PS3 1.3) |
 |---|---|---|---|
 | party | Multiplayer entered (this PC leads its own party; PS3 `0x4c48d0`) | 10, OWNER_AUTO_GRANT | 0x4C key, 0x4D party size, 0x4E/0x4F 0, 0x50 0, **0x52 = 1**, 0x53 0, bin 0x55 (8 zero bytes), bin 0x58 `"%s.%lld"`, member bin 0x59 |
-| custom game (match) | Start Match in a custom game (PS3 `0x444bb0` -> `0x4d421c`) | 10 (`0x49e620` is inlined on PS4), no flags | same, **0x52 = 2** |
+| custom game (match) | Start Match in a custom game (PS3 `0x444bb0` -> `0x4d421c`) | 10 (`0x49e620` is inlined on PS4), no flags | same, **0x52 = 2**, no 0x51 |
+| matchmaking | Find Match (PS3 `0x4b0f48`) | 10, OWNER_AUTO_GRANT | 0x4C playlist key, 0x4D party size, 0x4E/0x4F 0, 0x50 0, **0x51 tier**, **0x52 = 3**, 0x53 0, bin 0x55/0x58, member bin 0x59 |
 
-- 0x4C key = netInfo+0 when set (PS3: DC `6f1c3f87`[0] \| 0x90000), else the PC value `0x90102`
-  (PS4 never fills netInfo+0). Only PCs with the same key see each other.
-- 0x52 (searchable int 7, unused by PS3) tells the join list what a room is. PS3 hid its party rooms
-  and used NP Basic invites, which the room service does not carry; here party rooms are listed.
-- Lat/lon (0x4E/0x4F, bin 0x55) and region (0x50) are 0 on every PC (no heartbeat server); they only
-  mattered for stranger matchmaking, which is not ported.
+- 0x4C key = netInfo+0 when set (PS3: DC `6f1c3f87`[0] \| 0x90000), else the PC value `0x9004e`
+  (PS4 never fills netInfo+0). Custom rooms use the key directly; matchmaking rooms use
+  `(playlist index << 20) | key | 0x10000` (the index in the PS3 playlist list, not the playlist id).
+  Only rooms with the same key see each other. Live PS3 deathmatch checked: netInfo+0 `0x9004e`,
+  index `1`, key `0x19004e`. The PS3 room service also uses world `0x2001`, while RPCN
+  `find_world` returns `65537`; setting `kWorldOverride` (or `UNCHARTED_U2MP_WORLD`) to the PS3
+  world `0x2001` makes every RPCN create/search return request `0`, so the RPCN service does not
+  accept that world. The PC search uses the PS3 "Any game" form: key only, no `0x4E/0x4F` distance
+  and no `0x50` region/language filter. Created rooms carry `0x4E/0x4F = 0` and `0x50 = 0x4E`
+  (language mask; region assumed 0).
+- 0x52 (searchable int 7, unused by PS3) labels PC rooms for the local UI but is not a search filter.
+  PS3 rooms carry 0 there; the join list classifies them by 0x4C and lists the custom-key ones.
+- Lat/lon (0x4E/0x4F, bin 0x55) and region (0x50) are 0 on every PC (no heartbeat server); 0x51 is the
+  owner's rank for matchmaking. PS3 uses 0x50 for account region and 0x51 for tier.
 - Signaling type 1 (mesh): the service hands out every member's peer address.
 
 ## 3. Hooks

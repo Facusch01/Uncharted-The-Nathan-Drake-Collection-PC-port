@@ -439,7 +439,7 @@ void build_pad_stub(uint8_t *stub, bool player) {
     Code c{stub};
     emit_save(c);
     if (player) c.bytes({0x4c, 0x89, 0xe7});  // mov rdi, r12 (the player snapshot)
-    else c.bytes({0x48, 0x8b, 0x3b});         // mov rdi, [rbx] (the other writer's snapshot)
+    else c.bytes({0x48, 0x89, 0xdf});         // mov rdi, rbx (the other writer's snapshot)
     c.bytes({0x89, 0xc6});                    // mov esi, eax (the bit count)
     emit_call(c, reinterpret_cast<void *>(&snapshot_pad));
     emit_restore(c);

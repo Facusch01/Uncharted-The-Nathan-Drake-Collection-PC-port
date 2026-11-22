@@ -168,6 +168,7 @@ struct alignas(16) Playlist {
     int32_t first_type() const { return get<int32_t>(bytes + 0x40); }
     int32_t type_count() const { return get<int32_t>(bytes + 0x68); }
     int32_t type(int i) const { return get<int32_t>(bytes + 0x48 + 4 * i); }
+    int8_t ps3_index() const { return int8_t(bytes[0x6c]); }
 };
 
 constexpr int kMaxPlaylists = 32;
@@ -176,7 +177,7 @@ int built = 0;           // records of the last successful build (0: none yet)
 uint32_t applied = 0;    // the playlist id whose net game is already set
 
 void make_record(Playlist &p, uint32_t id, uint32_t name, uint32_t desc, uint32_t picture, const int32_t *types,
-                 int n) {
+                 int n, int8_t ps3_index = -1) {
     std::memset(p.bytes, 0, sizeof p.bytes);
     put<uint32_t>(p.bytes + 0x00, id);
     put<uint32_t>(p.bytes + 0x04, name);
@@ -187,6 +188,7 @@ void make_record(Playlist &p, uint32_t id, uint32_t name, uint32_t desc, uint32_
     put<uint32_t>(p.bytes + 0x44, picture);
     for (int i = 0; i < n; ++i) put<int32_t>(p.bytes + 0x48 + 4 * i, types[i]);
     put<int32_t>(p.bytes + 0x68, n);
+    put<uint8_t>(p.bytes + 0x6c, uint8_t(ps3_index));
 }
 
 // The PS3 playlists. Name and description are text ids, pictures are names under
@@ -197,6 +199,7 @@ struct PlaylistDef {
     uint32_t desc;   // 0: the first game type's description
     const char *pictures[3];
     uint32_t types[8];
+    int8_t ps3_index = -1;   // index in the PS3 playlist list when it differs from this order
 };
 
 constexpr uint32_t kDeathmatch = 0xa30341e7, kTeamDeathmatch = 0x8dfdede9, kPlunder = 0x3d9470a5,
@@ -208,7 +211,7 @@ const PlaylistDef kDefs[] = {
      {"grab-bag"}, {kDeathmatch, kTeamDeathmatch, kPlunder, kTurf, kKoh, kObjA, kObjB, kElimination}},
     {"ranked", 0x47b24464, 0x57fc82aa, {"mlg"},
      {kDeathmatch, kTeamDeathmatch, kPlunder, kTurf, kKoh, kObjA, kObjB, kElimination}},
-    {"deathmatch", kDeathmatch, 0xfc8dd900, {"deathmatch"}, {kDeathmatch, kTeamDeathmatch, kElimination}},
+    {"deathmatch", kDeathmatch, 0xfc8dd900, {"deathmatch"}, {kDeathmatch, kTeamDeathmatch, kElimination}, 1},
     {"elimination", kElimination, sid("u2mp/playlist/elimination/desc"), {"elimination"}, {kElimination}},
     {"objectives", 0x4bf30e73, 0x675ef552, {"objective"}, {kPlunder, kTurf, kKoh, kObjA, kObjB}},
     {"plunder", kPlunder, 0x32cc1acb, {"plunder"}, {kPlunder}},
@@ -289,7 +292,7 @@ void build_playlists() {
         }
         const uint32_t desc = def.desc ? def.desc : get<uint32_t>(type_record(found[0]) + 4);
         make_record(playlists[built++], sid(("u2mp/playlist/" + std::string(def.key)).c_str()), def.name, desc,
-                    picture, found, n);
+                    picture, found, n, def.ps3_index);
         log("menus: playlist %s -> picture %08x", def.key, picture);
     }
     if (built > 0) {
@@ -544,6 +547,15 @@ bool playlist_game_types(std::vector<int32_t> &types) {
         for (int i = 0; i < p.type_count(); ++i) types.push_back(p.type(i));
     }
     return !types.empty();
+}
+
+int32_t playlist_index(uint32_t id) {
+    for (int k = 0; k < built; ++k) {
+        if (playlists[k].id() != id) continue;
+        const int8_t ps3 = playlists[k].ps3_index();
+        return ps3 >= 0 ? ps3 : k;
+    }
+    return -1;
 }
 
 void install_menus(int &installed) {

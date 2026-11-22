@@ -77,11 +77,19 @@ constexpr uint16_t kVport = 1;                       // the one virtual port of 
 constexpr uint32_t kFlagOwnerAutoGrant = 0x80000000u, kFlagClosed = 0x40000000u, kFlagHidden = 0x10000000u;
 constexpr uint16_t A_KEY = 0x4c, A_PARTY_SIZE = 0x4d, A_LAT = 0x4e, A_LON = 0x4f, A_REGION = 0x50, A_TIER = 0x51,
                    A_KIND = 0x52, A_STATE = 0x53, A_LATLON = 0x55, A_NAME = 0x58;
-// 0x52 (searchable int 7) is unused by PS3; here it tells the join list what a room is. Matchmaking rooms
-// (PS3: 0x4C = playlist << 20 | version) carry the playlist in 0x51 (PS3's tier; no tiers on PC).
+// 0x52 (searchable int 7) is unused by PS3; it labels PC rooms for the local UI but is never a search
+// filter. Matchmaking rooms carry the playlist index in 0x4C (PS3: index << 20 | version | 0x10000) and
+// the tier in 0x51.
 enum : uint32_t { kKindParty = 1, kKindCustom = 2, kKindMatchmaking = 3 };
 // The 0x4C key: PS3 netInfo+0 (DC 6f1c3f87[0] | 0x90000); PS4 never fills it, then this PC value.
-constexpr uint32_t kPcNetVersion = 0x00090000u | 0x0102u;
+constexpr uint32_t kPcNetVersion = 0x00090000u | 0x004eu;   // PS3 netInfo+0 seen live (0x0009004e)
+constexpr uint32_t kWorldOverride = 0u;                     // PS3 world 0x2001 is rejected by RPCN; 0 keeps the server world
+// PS3 matchmaking range: Optimal/Close add 0x4E/0x4F distance and 0x50 region/language filters; Any adds
+// none (SearchRoom 0x4655b0 passes 0, 0, -1). Keep Any so another player's room is never filtered out.
+enum class MatchRange { Optimal, Close, Any };
+constexpr MatchRange kMatchRange = MatchRange::Any;
+constexpr int32_t kPcLat = 0, kPcLon = 0;                  // PS3 location object read 0/0
+constexpr uint32_t kPcRegion = 0x0000004eu;                 // PS3 netInfo+0 language mask, region 0
 constexpr uint32_t kMaxSlot = 10;                    // custom (0x49e620, inlined on PS4) and party: 10 players
 constexpr size_t kBlobSize = 48;                     // member bin 0x59 (PS3 0x4af240)
 constexpr double kJoinTimeout = 20.0, kCreateTimeout = 15.0, kSwitchDelay = 0.3, kRttLogPeriod = 10.0;
@@ -294,7 +302,7 @@ struct BoardView {
 enum class Mm { Idle, Searching, Joining, Creating, Hosting, Joined, Failed };
 Mm mm_state = Mm::Idle;
 uint64_t mm_search_req = 0;
-uint32_t mm_playlist = 0;
+uint32_t mm_playlist_index = 0;
 std::vector<uint64_t> mm_bad_rooms;   // rooms that did not work out this session (PS3: dead-peer ring 0x4e8978)
 
 // host migration / promote (PORT-MATCHMAKING.md 3.7)
@@ -350,6 +358,16 @@ std::string npid_text(const char *npid) { return std::string(npid, strnlen(npid,
 uint32_t room_key() {
     const uint32_t v = G<uint32_t>(kNetInfo + NI_VERSION);
     return v ? v : kPcNetVersion;
+}
+
+uint32_t match_key(uint32_t playlist_index) {
+    return ((playlist_index & 0xfff) << 20) | room_key() | 0x10000;
+}
+
+uint32_t room_kind(const U2oRoomExt &x) {
+    const uint32_t kind = x.int_attr[A_KIND - A_KEY];
+    if (kind == kKindParty || kind == kKindCustom || kind == kKindMatchmaking) return kind;
+    return (x.int_attr[A_KEY - A_KEY] & 0xfff00000u) ? kKindMatchmaking : kKindCustom;
 }
 
 uint32_t top_page_id() {
@@ -490,22 +508,23 @@ void publish_blob(Room &r, bool force) {
 }
 
 uint64_t create_room(uint32_t kind) {
-    // PS3 CreateJoinRoom 0x4d421c: searchable ints 0x4C key, 0x4D party size, 0x4E/0x4F lat/lon (no
-    // location service: 0 on every PC), 0x50 region (PC: the owner's rank, for the matchmaking tier
-    // preference; PS3 region), 0x52 kind (PC), 0x53 state; bin 0x55 lat/lon
-    // floats (8 bytes, 0), bin 0x58 room name "%s.%lld"; member bin 0x59.
+    // PS3 CreateJoinRoom 0x4d421c: searchable ints 0x4C key, 0x4D party size, 0x4E/0x4F lat/lon, 0x50
+    // region/languages, 0x51 tier (matchmaking only), 0x52 kind (PC only), 0x53 state; bin 0x55 lat/lon
+    // floats (8 bytes), bin 0x58 room name "%s.%lld"; member bin 0x59.
     static uint8_t latlon[8];
     static char name[64];
     std::snprintf(name, sizeof name, "%s.%lld", session::local_name().c_str(), (long long)std::time(nullptr));
     const uint32_t party_size = uint32_t(std::max(1, session::member_count()));
-    const U2oAttr attrs[] = {
-        {A_KEY, 0, room_key(), nullptr},          {A_PARTY_SIZE, 0, party_size, nullptr},
-        {A_LAT, 0, 0, nullptr},                   {A_LON, 0, 0, nullptr},
-        {A_REGION, 0, uint32_t(session::rank()), nullptr},   {A_KIND, 0, kind, nullptr},
+    const uint32_t key = kind == kKindMatchmaking ? match_key(mm_playlist_index) : room_key();
+    U2oAttr attrs[10] = {
+        {A_KEY, 0, key, nullptr},                 {A_PARTY_SIZE, 0, party_size, nullptr},
+        {A_LAT, 0, uint32_t(kPcLat), nullptr},    {A_LON, 0, uint32_t(kPcLon), nullptr},
+        {A_REGION, 0, kPcRegion, nullptr},        {A_KIND, 0, kind, nullptr},
         {A_STATE, 0, 0, nullptr},                 {A_LATLON, uint16_t(sizeof latlon), 0, latlon},
         {A_NAME, uint16_t(std::strlen(name)), 0, reinterpret_cast<const uint8_t *>(name)},
-        {A_TIER, 0, kind == kKindMatchmaking ? mm_playlist : 0, nullptr},
     };
+    uint32_t attr_count = 9;
+    if (kind == kKindMatchmaking) attrs[attr_count++] = {A_TIER, 0, uint32_t(session::rank()), nullptr};
     const auto blob = member_blob();
     U2oCreate c{};
     c.max_slot = kMaxSlot;
@@ -513,14 +532,14 @@ uint64_t create_room(uint32_t kind) {
     // RPCN hands a room to the next member whenever its owner leaves, so every room has it.
     c.flag_attr = kFlagOwnerAutoGrant;
     c.attrs = attrs;
-    c.attr_count = uint32_t(sizeof attrs / sizeof *attrs);
+    c.attr_count = attr_count;
     c.member_bin = blob.data();
     c.member_bin_len = uint32_t(blob.size());
     c.team = 0;
     c.signaling = 1;   // mesh: the room service hands out every member's peer address
     const uint64_t id = api.create_room(world, &c);
     log("online: creating the %s room in world %u: key 0x%x, party size %u, %u slots, name %s (request %llu)",
-        kind_name(kind), world, room_key(), party_size, kMaxSlot, name, (unsigned long long)id);
+        kind_name(kind), world, key, party_size, kMaxSlot, name, (unsigned long long)id);
     request(id, Pending{kind == kKindParty ? Req::CreateParty : kind == kKindMatchmaking ? Req::CreateMatchmaking : Req::CreateMatch,
                         0, kind, false, "create"});
     return id;
@@ -558,13 +577,12 @@ void start_search() {
         return;
     }
     // PS3 0x4655b0 -> SearchRoom 0x4d3c50(0, 0, -1, 0, 0, 0, 0): only 0x4C == netInfo+0; open rooms only.
+    // That is the "Any game" range: no 0x4E/0x4F distance and no 0x50 region/language filters.
     U2oSearch s{};
     s.flag_filter = kFlagHidden | kFlagClosed;
     s.flag_attr = 0;
     s.ints[0] = U2oIntFilter{1, 0, A_KEY, room_key()};
-    s.ints[1] = U2oIntFilter{2, 0, A_KIND, kKindMatchmaking};   // matchmaking rooms: Find Match only
-    s.ints[2] = U2oIntFilter{6, 0, A_KIND, kKindParty};         // PC rooms only (RPCS3's PS3 rooms carry 0 there)
-    s.int_count = 3;
+    s.int_count = 1;
     s.start = 1;
     s.max = U2O_MAX_ROOMS;
     search_req = api.search_rooms(world, &s);
@@ -572,7 +590,9 @@ void start_search() {
     found.clear();
     G<uint8_t>(kMatch + M_SEARCH_DONE) = 0;
     G<int32_t>(kMatch + M_SEARCH_RESULT) = 0;
-    log("online: join list: searching world %u for key 0x%x (request %llu)", world, room_key(), (unsigned long long)search_req);
+    log("online: join list: searching world %u for key 0x%x, range %s, %u filter(s) (request %llu)",
+        world, room_key(), kMatchRange == MatchRange::Any ? "any" : kMatchRange == MatchRange::Close ? "close" : "optimal",
+        s.int_count, (unsigned long long)search_req);
     if (!searching) search_failed();
     else request(search_req, Pending{Req::Search, 0, 0, false, "search"});
 }
@@ -878,11 +898,11 @@ void mm_search_done(const U2oEvent &e) {
         log("online: matchmaking: room %llx of %s, %u/%u players%s", (unsigned long long)x.room_id, x.owner_name,
             unsigned(x.cur_members), unsigned(x.max_slot), bad ? " (failed before)" : free_slots < party ? " (no room for us)" : "");
         if (bad || free_slots < party || room_by_id(x.room_id)) continue;
-        // PS3 0x4b13ac scored by distance and tier (no location on PC): rooms whose owner's rank (0x50) is
-        // within kTierSpan of ours come first, then the fullest room wins, so players gather.
-        const int dr = int(x.int_attr[A_REGION - A_KEY]) - session::rank();
+        // PS3 0x4b13ac scored by distance and tier (no location on PC): rooms whose tier (0x51) is within
+        // kTierSpan of ours come first, then the fullest room wins, so players gather.
+        const int dr = int(x.int_attr[A_TIER - A_KEY]) - session::rank();
         const bool close_rank = dr <= kTierSpan && dr >= -kTierSpan;
-        const int db = best ? int(best->int_attr[A_REGION - A_KEY]) - session::rank() : 0;
+        const int db = best ? int(best->int_attr[A_TIER - A_KEY]) - session::rank() : 0;
         const bool best_near = best && db <= kTierSpan && db >= -kTierSpan;
         if (!best || (close_rank && !best_near) || (close_rank == best_near && x.cur_members > best->cur_members)) best = &x;
     }
@@ -1042,9 +1062,17 @@ void on_event(const U2oEvent &e) {
             next_world_try = now() + 10;
             break;
         }
-        world = e.world;
+        world = kWorldOverride ? kWorldOverride : e.world;
         world_server = e.server;
-        log("online: world %u on server %u", world, unsigned(world_server));
+        if (const char *w = std::getenv("UNCHARTED_U2MP_WORLD")) {
+            char *end = nullptr;
+            const unsigned long v = std::strtoul(w, &end, 0);
+            if (end && *end == '\0' && v && v <= 0xffff) {
+                world = uint32_t(v);
+                log("online: world override %u", world);
+            }
+        }
+        log("online: world %u on server %u%s", world, unsigned(world_server), kWorldOverride ? " (override)" : "");
         break;
     case U2O_EV_ROOM_CREATED: {
         if (known && p.kind == Req::CreateMatchmaking) {   // PS3 "GATHER": CreateJoinRoom 0x4b2a18
@@ -1156,11 +1184,12 @@ void on_event(const U2oEvent &e) {
         for (uint32_t i = 0; i < e.count && e.rooms && i < U2O_MAX_ROOMS; ++i) {
             const U2oRoomExt &x = e.rooms[i];
             const bool ours = room_by_id(x.room_id) != nullptr;
+            const uint32_t kind = room_kind(x);
             log("online: join list: room %llx %s of %s, %u/%u members, kind %u, state %u, flags 0x%x%s",
-                (unsigned long long)x.room_id, x.int_attr[A_KIND - A_KEY] == kKindParty ? "party" : "custom game",
-                x.owner_name, unsigned(x.cur_members), unsigned(x.max_slot), x.int_attr[A_KIND - A_KEY],
-                x.int_attr[A_STATE - A_KEY], x.flag_attr, ours ? " (ours, not listed)" : "");
-            if (!ours) found.push_back(x);
+                (unsigned long long)x.room_id, kind_name(kind), x.owner_name, unsigned(x.cur_members),
+                unsigned(x.max_slot), kind, x.int_attr[A_STATE - A_KEY], x.flag_attr,
+                ours ? " (ours, not listed)" : "");
+            if (!ours && kind == kKindCustom) found.push_back(x);
         }
         log("online: join list: %zu room(s) listed (%u found, %u in total)", found.size(), e.count, e.total);
         G<uint8_t>(kMatch + M_SEARCH_DONE) = 1;
@@ -1362,6 +1391,7 @@ void room_state() {
         if (!match_running && in_match) log("online: NET_SM %d: back from the match", s);
         last_net_state = s;
     }
+    if (s == 35) session::note_leaving();
     const bool ended = in_match && !match_running;
     const bool began = !in_match && match_running;
     in_match = match_running;
@@ -1659,7 +1689,7 @@ const char *join_row(int row) {
     if (size_t(row) >= found.size() || row >= U2O_MAX_ROOMS) return "";
     const U2oRoomExt &x = found[size_t(row)];
     std::snprintf(row_text[row], sizeof row_text[row], "%.40s - %s (%u/%u)", x.owner_name,
-                  x.int_attr[A_KIND - A_KEY] == kKindParty ? "Party" : "Custom Game", unsigned(x.cur_members),
+                  room_kind(x) == kKindParty ? "Party" : "Custom Game", unsigned(x.cur_members),
                   unsigned(x.max_slot));
     return row_text[row];
 }
@@ -1696,7 +1726,7 @@ bool select_join(int row) {
     }
     const auto blob = member_blob();
     const uint64_t id = api.join_room(x.room_id, blob.data(), uint32_t(blob.size()), 0);
-    const uint32_t kind = x.int_attr[A_KIND - A_KEY] == kKindParty ? kKindParty : kKindCustom;
+    const uint32_t kind = room_kind(x) == kKindParty ? kKindParty : kKindCustom;
     log("online: joining %s room %llx of %s (%d free slot(s), party of %d): request %llu", kind_name(kind),
         (unsigned long long)x.room_id, x.owner_name, free_slots, party, (unsigned long long)id);
     if (!id) {
@@ -1894,24 +1924,25 @@ int invite_count() { return started ? int(invites.size()) : 0; }
 // ---- stranger matchmaking -------------------------------------------------------------------------
 bool mm_online() { return started && link_state == U2O_READY && world != 0; }
 
-void mm_begin(uint32_t playlist) {
+void mm_begin(uint32_t playlist, uint32_t playlist_index) {
     if (!mm_online()) return;
-    mm_playlist = playlist;
+    mm_playlist_index = playlist_index;
     if (match_room_.owned() && match_room_.kind == kKindMatchmaking) {   // our gather room is still open
         mm_state = Mm::Hosting;
         return;
     }
-    // PS3 0x4b0f48 -> SearchRoom 0x4d3c50: 0x4C == key (version + playlist), open rooms only.
+    // PS3 0x4b0f48 -> SearchRoom 0x4d3c50: 0x4C == key (version + playlist), open rooms only. PS3
+    // matchmaking rooms carry no 0x52, so the key is the only filter.
+    const uint32_t key = match_key(playlist_index);
     U2oSearch s{};
     s.flag_filter = kFlagHidden | kFlagClosed;
-    s.ints[0] = U2oIntFilter{1, 0, A_KEY, room_key()};
-    s.ints[1] = U2oIntFilter{1, 0, A_KIND, kKindMatchmaking};
-    s.ints[2] = U2oIntFilter{1, 0, A_TIER, playlist};
-    s.int_count = 3;
+    s.ints[0] = U2oIntFilter{1, 0, A_KEY, key};
+    s.int_count = 1;
     s.start = 1;
     s.max = U2O_MAX_ROOMS;
     mm_search_req = api.search_rooms(world, &s);
-    log("online: matchmaking: searching for rooms of playlist 0x%x (request %llu)", playlist, (unsigned long long)mm_search_req);
+    log("online: matchmaking: searching for playlist 0x%x (index %u), key 0x%x (request %llu)", playlist, playlist_index, key,
+        (unsigned long long)mm_search_req);
     if (!mm_search_req) {
         mm_state = Mm::Failed;
         return;

@@ -1,7 +1,9 @@
 // u2mp medals: the results page falls back to the pop-up's default medal for medals whose
 // picture the Collection's net.pak lacks.
 #include <cstdint>
+#include <cstring>
 
+#include "frontend3.h"
 #include "u2mp_internal.h"
 
 namespace u2mp {
@@ -20,37 +22,83 @@ struct MedalIcon {
 
 using LookupFn = MedalIcon(U2MP_GUEST *)(const char *, int);
 
-U2MP_GUEST MedalIcon medal_results_icon(const char *name, int table) {
+U2MP_GUEST MedalIcon medal_icon_trace(const char *name, int table) {
     MedalIcon icon = reinterpret_cast<LookupFn>(image.base + kIconLookup)(name, table);
-    if (uint32_t(icon.sid)) return icon;
+    const bool medal_icon = name && std::strstr(name, "medal-icons");
+    const int64_t old_index = int64_t(icon.index);
+    if (name && (std::strstr(name, "medal") || std::strstr(name, "Medal"))) {
+        static int logged = 0;
+        if (logged < 128) {
+            log("medal icon trace: %s table %d -> sid %08x index %d", name, table, uint32_t(icon.sid), int(icon.index));
+            ++logged;
+        }
+    }
+    if (!medal_icon) return icon;
 
-    const uint64_t medal = *image.at<uint64_t>(kMedalElement);
-    if (!medal) return icon;
-    const uint64_t sid = *reinterpret_cast<const uint64_t *>(medal + 0x4c);
-    const uint32_t index = *reinterpret_cast<const uint32_t *>(medal + 0x54);
-    if (!uint32_t(sid)) return icon;
-    static bool logged = false;
-    if (!logged) {
-        logged = true;
-        log("medals: a missing result icon uses the default sid %08x index %u", uint32_t(sid), index);
+    static MedalIcon last_good;
+    icon.index = uint64_t(-1);   // the PS3 index does not select the same PS4 material
+    if (uint32_t(icon.sid) && menu_net_material(uint32_t(icon.sid))) {
+        last_good = icon;
+        return icon;
     }
 
-    icon.sid = sid;
-    icon.index = index;
-    return icon;
+    const uint64_t medal = *image.at<uint64_t>(kMedalElement);
+    MedalIcon fallback{};
+    if (medal) {
+        fallback.sid = *reinterpret_cast<const uint64_t *>(medal + 0x4c);
+        fallback.index = uint64_t(-1);
+    }
+    if (!uint32_t(fallback.sid) || !menu_net_material(uint32_t(fallback.sid))) {
+        for (const char *known : {"general/net/medal-icons/no-death", "general/net/medal-icons/streak",
+                                  "general/net/medal-icons/commando"}) {
+            MedalIcon good = reinterpret_cast<LookupFn>(image.base + kIconLookup)(known, 1);
+            good.index = uint64_t(-1);
+            if (uint32_t(good.sid) && menu_net_material(uint32_t(good.sid))) {
+                fallback = good;
+                break;
+            }
+        }
+    }
+    if (!uint32_t(fallback.sid) || !menu_net_material(uint32_t(fallback.sid))) fallback = last_good;
+    if (!uint32_t(fallback.sid)) return icon;
+    static int logged = 0;
+    if (logged < 16) {
+        ++logged;
+        log("medals: %s has no icon (sid %08x index %d), using sid %08x", name, uint32_t(icon.sid), int(old_index),
+            uint32_t(fallback.sid));
+    }
+    return fallback;
+}
+
+int trace_icon_lookups() {
+    int traced = 0;
+    for (uint64_t i = 0; i + 5 <= image.size; ++i) {
+        if (image.base[i] != 0xe8) continue;
+        int32_t rel = 0;
+        std::memcpy(&rel, image.base + i + 1, 4);
+        if (int64_t(i) + 5 + rel != int64_t(kIconLookup)) continue;
+        if (retarget_call(i, kIconLookup, reinterpret_cast<void *>(&medal_icon_trace), "medal icon trace"))
+            ++traced;
+    }
+    return traced;
 }
 
 }  // namespace
 
 void install_medals(int &installed) {
     static bool logged = false;
-    if (retarget_call(kResultsLookup, kIconLookup, reinterpret_cast<void *>(&medal_results_icon),
+    if (retarget_call(kResultsLookup, kIconLookup, reinterpret_cast<void *>(&medal_icon_trace),
                       "medal results icon")) {
         ++installed;
         if (!logged) {
             logged = true;
             log("medals: results page uses the pop-up's default medal for missing icons");
         }
+    }
+    const int traced = trace_icon_lookups();
+    if (traced) {
+        ++installed;
+        log("medals: icon trace on %d call sites", traced);
     }
 }
 

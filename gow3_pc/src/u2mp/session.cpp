@@ -57,6 +57,7 @@ constexpr uint64_t kAbortByte = 0x113a270;
 constexpr uint64_t kMatchOver = 0x104f1c0;
 constexpr uint64_t kMatchOverCompanion = 0x14ce978;
 constexpr uint64_t kIdleTimer = 0x14cec0c;
+constexpr uint64_t kIdleLimit = 0xe622a8;
 constexpr uint64_t kCustomChoiceCount = 0x113ddb0;
 constexpr uint64_t kLevelListHead = 0x1534140;
 constexpr uint64_t kAbortSlot = 0x103fa70;
@@ -167,6 +168,8 @@ bool host_lost = false;
 bool roster_synced = false;
 bool multiplayer_page_seen = false;
 double leaving_since = 0.0;
+bool leaving_seen = false;
+int leaving_cleanup = 0;
 uint8_t sent_rank = 0xff;
 uint8_t sent_team = 0xff;
 double next_rate_log = 0;
@@ -273,6 +276,7 @@ void add_tracker(uint32_t net_id, const std::string &name, bool local) {
     put<int32_t>(t + 0x198, net_id >= 1 && net_id <= 3 ? int32_t(net_id) - 1 : 0);
     t[0x26c] = 0;
     t[0x275] = 1;
+    if (!local) t[0x148] = 1;  // ready: EstablishConnection waits for this on a peer
     t[0x27c] = 1;
     if (local) put<uint64_t>(ngm(), addr_of(t));
     if (net_id == host_id) put<uint64_t>(ngm() + 8, addr_of(t));
@@ -372,6 +376,57 @@ void finish_leaving_game() {
         put<int32_t>(g(kNetInfo) + 0x34, 0);
         match[0xc8] = 1;
     }
+}
+
+void return_from_leaving() {
+    uint8_t *m = menu();
+    bool popped = false;
+    for (int i = 0; i < 5; ++i) {
+        const int32_t top = get<int32_t>(m + 0x1010);
+        uint8_t *page = top >= 0 && top <= 0x40 ? ptr_at(m + 0x9d0 + 8 * uint64_t(top)) : nullptr;
+        if (!page) break;
+        const uint32_t id = get<uint32_t>(page + 0x10);
+        if (id != kMessageBoxPage && id != kPageLeavingGame) break;
+        log("leaving the match: popping page %08x", id);
+        guest<void(U2MP_GUEST *)(void *)>(kPopPage)(menu());
+        popped = true;
+    }
+    leaving_cleanup = 300;
+    if (popped) guest<void(U2MP_GUEST *)(void *)>(kMenuReset)(menu());
+    if (lobby_returning) {
+        set_net_sm(17);
+        show_page(kPageLobby);
+    } else {
+        set_net_sm(18);
+        show_page(kPageMultiplayer);
+    }
+    log("leaving the match: back to %s", lobby_returning ? "the lobby" : "the Multiplayer page");
+}
+
+void cleanup_leaving_page() {
+    if (hosting || leaving_cleanup <= 0) return;
+    --leaving_cleanup;
+    const uint32_t id = top_page_id();
+    if (id != kPageLeavingGame && id != kMessageBoxPage) return;
+    log("leaving the match: closing page %08x", id);
+    guest<void(U2MP_GUEST *)(void *)>(kPopPage)(menu());
+    show_page(lobby_returning ? kPageLobby : kPageMultiplayer);
+}
+
+void leaving_step() {
+    if (hosting || !leaving_seen) return;
+    const int32_t s = net_sm();
+    if (s == 35) {
+        if (leaving_since == 0.0) leaving_since = gamenet::clock();
+        if (gamenet::clock() - leaving_since < 3.0) return;
+    } else if (s != 3 && s != 18) {
+        leaving_seen = false;
+        leaving_since = 0.0;
+        return;
+    }
+    leaving_seen = false;
+    leaving_since = 0.0;
+    return_from_leaving();
 }
 
 // ---- packages -----------------------------------------------------------------------------------------
@@ -967,6 +1022,7 @@ void check_net_package() {
 
 void sync_tracker_teams();
 void sync_stats_teams();
+bool cooperative_match();
 
 void frame_work() {
     // scan_type_vtables();   // off for now: the type-vtable scan and dump are a debugging aid (PR 21)
@@ -1041,10 +1097,28 @@ void frame_work() {
     if (transport.connected()) sync_tracker_teams();
     if (frames % 30 == 0) sync_stats_teams();
     if (transport.connected()) {
-        const int32_t team = int32_t(transport.local_slot() & 1) + 1;
+        const int32_t mode = get<int32_t>(g(kNetInfo) + 0x2c4);
+        const bool coop = cooperative_match();
+        int32_t team;
+        if (coop) {
+            team = hosting ? local_team() : int32_t(members[host_id].team);
+            if (team != 1 && team != 2) team = 1;
+        } else {
+            team = int32_t(transport.local_slot() & 1) + 1;
+        }
         if (get<int32_t>(g(kNpd) + 0x114) != team) {
             put<int32_t>(g(kNpd) + 0x114, team);
-            log("party: team preference %d for slot %u (auto-balance)", int(team), unsigned(transport.local_slot()));
+            log("party: team preference %d for slot %u (%s, mode %d)", int(team),
+                unsigned(transport.local_slot()), coop ? "co-op: host team" : "auto-balance", int(mode));
+        }
+        if (hosting && coop) {
+            bool changed = false;
+            for (int s = 0; s < kSlots; ++s)
+                if (members[s].used && members[s].team != team) {
+                    members[s].team = uint8_t(team);
+                    changed = true;
+                }
+            if (changed) broadcast_teams();
         }
     }
     if (frames % 120 == 7) {
@@ -1111,13 +1185,26 @@ void frame_work() {
         }
         last_sm = s;
     }
+    if (!hosting && leaving_seen && (s == 3 || s == 18)) {
+        leaving_seen = false;
+        leaving_since = 0.0;
+        return_from_leaving();
+    }
     if (s == 35) {
+        if (!hosting) leaving_seen = true;
         if (leaving_since == 0.0) leaving_since = now;
         if (hosting && now - leaving_since > 3.0) {
             leaving_since = 0.0;
             log("leaving the match: no client acknowledgement after 3 s; returning to the lobby");
             set_net_sm(3);
             show_page(kPageHostCreate);
+        } else if (!hosting && now - leaving_since > 3.0) {
+            leaving_since = 0.0;
+            leaving_seen = false;
+            lobby_returning = false;
+            log("leaving the match: no host acknowledgement after 3 s; back to the multiplayer page");
+            set_net_sm(18);
+            show_page(kPageMultiplayer);
         }
     } else {
         leaving_since = 0.0;
@@ -1133,6 +1220,8 @@ void frame_work() {
 U2MP_GUEST void page_handler(uint32_t *event) {
     if (!event || event[0] != 6) return;   // 6: per-frame update
     finish_leaving_game();
+    leaving_step();
+    cleanup_leaving_page();
     const bool page_open = multiplayer_page_open();
     if (page_open) multiplayer_page_seen = true;
     if (active && net_sm() == 18 && !page_open) {
@@ -1885,6 +1974,12 @@ int member_count() {
     return n;
 }
 
+void note_leaving() {
+    if (hosting) return;
+    leaving_seen = true;
+    if (leaving_since == 0.0) leaving_since = gamenet::clock();
+}
+
 std::string local_name() {
     const char *env = std::getenv("UNCHARTED_U2MP_NAME");
     if (env && *env) return cut(env, 31);
@@ -2138,6 +2233,15 @@ void install(int &installed) {
 
     if (get<uint64_t>(g(kAbortSlot)) == addr_of(g(kAbortOriginal)))
         put<uint64_t>(g(kAbortSlot), addr_of(reinterpret_cast<void *>(&abort_wrapper)));
+
+    static const unsigned char idle_120[] = {0x00, 0x00, 0xf0, 0x42};
+    if (image.matches(kIdleLimit, idle_120, sizeof idle_120)) {
+        put<float>(g(kIdleLimit), 300.0f);
+        log("idle kick: limit 120 s -> 300 s");
+        ++installed;
+    } else {
+        log("idle kick limit at 0x%llx differs: left alone", (unsigned long long)kIdleLimit);
+    }
 }
 
 }  // namespace session

@@ -859,6 +859,9 @@ bool install_carry_log() {
 using Serialize = void(U2MP_GUEST *)(void *, BitStream *);
 Serialize emit_grenade_read_game, emit_grenade_write_game;
 Serialize grenade_explode_read_game, grenade_explode_write_game;
+Serialize emit_rocket_read_game, emit_rocket_write_game;
+using Apply = void(U2MP_GUEST *)(void *, void *);
+Apply emit_rocket_apply_game;
 
 // The extra words must not push the cursor past maxBits: write_bits advances even when the
 // field does not fit, while read_bits leaves the cursor alone. Skipping the write here keeps
@@ -894,6 +897,53 @@ U2MP_GUEST void write_grenade_explode(void *ev, BitStream *bs) {
     append_u32(*bs, load<uint32_t>(ev, 0x170));
 }
 
+// 11 NetEventEmitRocket: the rocket's settings id at +0x50. A rocket whose settings are not
+// loaded here cannot be spawned; the game asserts in projectile Init and then faults.
+bool settings_loaded(uint32_t id) {
+    if (!id) return false;
+    auto find = guest<void *(U2MP_GUEST *)(uint32_t)>(0xa15300);
+    void *slot = find(id);
+    void *object = slot ? load<void *>(slot, 0) : nullptr;
+    return object && load<void *>(object, 0xb0);
+}
+U2MP_GUEST void read_emit_rocket(void *ev, BitStream *bs) {
+    emit_rocket_read_game(ev, bs);
+    uint32_t v = 0;
+    if (read_bits(*bs, v, 32)) store<uint32_t>(ev, 0x50, v);
+}
+U2MP_GUEST void write_emit_rocket(void *ev, BitStream *bs) {
+    emit_rocket_write_game(ev, bs);
+    append_u32(*bs, load<uint32_t>(ev, 0x50));
+}
+U2MP_GUEST void apply_emit_rocket(void *ev, void *conn) {
+    const uint32_t id = load<uint32_t>(ev, 0x50);
+    if (!settings_loaded(id)) {
+        static uint32_t told[8];
+        static unsigned count;
+        unsigned i = 0;
+        while (i < count && told[i] != id) ++i;
+        if (i == count && count < 8) {
+            told[count++] = id;
+            log("net rocket: settings %08x not loaded, left out", id);
+        }
+        return;
+    }
+    emit_rocket_apply_game(ev, conn);
+}
+bool install_rocket_guard() {
+    constexpr uint64_t vtable = 0x1041390, apply = 0x63a7c0;
+    if (vtable + 0x28 > image.size) return false;
+    uint64_t *entry = image.at<uint64_t>(vtable + 0x20);
+    if (*entry != uint64_t(uintptr_t(image.base + apply))) {
+        log("net rocket: Apply expected 0x%llx, left alone", static_cast<unsigned long long>(apply));
+        return false;
+    }
+    emit_rocket_apply_game = reinterpret_cast<Apply>(*entry);
+    *entry = uint64_t(uintptr_t(&apply_emit_rocket));
+    log("net rocket: Apply guarded (EmitRocket +0x50)");
+    return true;
+}
+
 bool install_extra_fields() {
     struct Extra {
         uint64_t vtable;
@@ -908,6 +958,8 @@ bool install_extra_fields() {
         {0x1040c60, 3, 0x62b250, &emit_grenade_write_game, &write_emit_grenade, "EmitGrenade +0x40 write"},
         {0x1040c10, 2, 0x62a780, &grenade_explode_read_game, &read_grenade_explode, "GrenadeExplode +0x14/+0x18/+0x170 read"},
         {0x1040c10, 3, 0x62a020, &grenade_explode_write_game, &write_grenade_explode, "GrenadeExplode +0x14/+0x18/+0x170 write"},
+        {0x1041390, 2, 0x63b050, &emit_rocket_read_game, &read_emit_rocket, "EmitRocket +0x50 read"},
+        {0x1041390, 3, 0x63ad40, &emit_rocket_write_game, &write_emit_rocket, "EmitRocket +0x50 write"},
     };
     int done = 0;
     for (const Extra &e : extras) {
@@ -1047,6 +1099,7 @@ void install_events(int &installed) {
     log("net events: %d stubbed Read/Write/Apply slots ported", ported);
     installed += ported;
     if (install_extra_fields()) ++installed;
+    if (install_rocket_guard()) ++installed;
     if (install_attack_log()) ++installed;
     if (install_carry_log()) ++installed;
     if (install_message_read()) ++installed;

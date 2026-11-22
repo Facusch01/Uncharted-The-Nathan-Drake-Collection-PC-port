@@ -92,7 +92,7 @@ bool record_score(uint32_t board, int64_t score, const char *comment, const uint
 // ---- stranger matchmaking (frontend3.cpp; PS3 0x4b0a58 search / join / create) ----
 enum { kMmIdle = 0, kMmBusy = 1, kMmHosting = 2, kMmJoined = 3, kMmFailed = 4 };
 bool mm_online();                    // online with a world: matchmaking finds strangers
-void mm_begin(uint32_t playlist);    // host in NET_SM 19: search, then join a room or create one
+void mm_begin(uint32_t playlist, uint32_t playlist_index);    // host in NET_SM 19: search, then join a room or create one
 int mm_step();
 void mm_reset();
 void mm_research();                  // nobody came: leave our gather room, search again

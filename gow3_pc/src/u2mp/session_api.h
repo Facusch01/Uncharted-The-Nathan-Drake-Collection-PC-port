@@ -15,6 +15,9 @@ bool member_skins(uint32_t net_id, std::string &hero, std::string &villain);
 uint8_t *request_package(const char *name);
 // This PC's net id; 0 when it is not in a party.
 uint32_t local_id();
+// The online layer saw the client enter NET_SM 35; the session returns it to the Multiplayer page when
+// the game then jumps to state 3 without a frame in 35.
+void note_leaving();
 // True when this PC leads the party (it hosts the transport).
 bool is_host();
 // Host only: tells the member with this net id that it was kicked. It leaves the party, and the

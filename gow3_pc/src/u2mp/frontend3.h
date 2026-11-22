@@ -18,6 +18,8 @@ void install_loading(int &installed);
 // menus.cpp: the game types of the chosen matchmaking playlist (NetPlayerData+0x104). False when no
 // playlist of ours is chosen.
 bool playlist_game_types(std::vector<int32_t> &types);
+// The position of playlist `id` in the PS3 playlist list, or -1.
+int32_t playlist_index(uint32_t id);
 
 namespace session {
 // Session message types >= kFrontendMessages are frontend3's (session.cpp forwards them).
