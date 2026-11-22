@@ -1163,6 +1163,9 @@ void u2_import(bool silent, const std::string &reason = "") {
     std::vector<std::string> cmd = {exe, "--ps4", game_dir(), "--ps3", ps3, "--out", out};
     const std::string data = u2_data_folder();   // GOTY data only: the game data folder, no map pack folder
     if (!data.empty()) { cmd.push_back("--ps3-data"); cmd.push_back(data); }
+    // the Uncharted 2 community server DNS: the import downloads the game data (NPUA80698DATA2) through it
+    const std::string dns = strip(text(g.config, "u2mp_dns"));
+    if (!dns.empty()) { cmd.push_back("--dns"); cmd.push_back(dns); }
     const std::string elf = text(g.config, "u2mp_ps3_elf");   // else the import looks for USRDIR/EBOOT.elf
     if (!elf.empty()) { cmd.push_back("--ps3-elf"); cmd.push_back(elf); }
     if (silent) cmd.push_back("--update");
@@ -1212,6 +1215,8 @@ void u2_poll() {
             g.u2.step = "Step " + std::to_string(g.u2.steps_n) + "/" + std::to_string(g.u2.steps_total) + ": file " +
                         std::to_string((long long)num(ev.get("n"))) + "/" + std::to_string((long long)num(ev.get("total"))) +
                         ": " + text(ev, "key").substr(0, 80);
+        } else if (phase == "data2" && !text(ev, "note").empty()) {
+            g.u2.step = text(ev, "note");   // the game-data download through the U2 community server DNS
         } else if (phase == "done") {
             g.u2.n = g.u2.total = 1;
             const std::string status = text(ev, "status");

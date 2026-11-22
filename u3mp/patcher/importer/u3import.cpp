@@ -145,19 +145,40 @@ std::vector<std::string> data2_problems(const std::vector<std::string> &folders)
     return out;
 }
 
+// the USRDIR of a usable game-data folder among these folders (the one the recipe would read), else empty
+fs::path usable_data2(const std::vector<std::string> &folders) {
+    Inputs inp;
+    std::vector<fs::path> f;
+    for (const auto &x : folders) f.push_back(P(x));
+    inp.add_ps3_u3(f);
+    const auto it = inp.ps3.find("data2");
+    if (it == inp.ps3.end()) return {};
+    for (const auto &p : full_import_problems(inp))
+        if (p.find("DLC map packs") == std::string::npos) return {};
+    return it->second;
+}
+
 // The online program's game-data download: `uncharted_online.exe --fetch-game-data <dns> <target> <EBOOT.elf>` writes
 // <target>/USRDIR/... as Uncharted 3 would when it goes online (where the files come from is the online program's
 // business). Its stdout lines: start, get <path> <got> <total>, file <path> <bytes>, note <path> <text>, fail <path>
-// <text>, error <text>, done <files> <bytes> <failed>; exit 0 = complete. Returns "" or what went wrong (no addresses:
-// the program prints none, and the DNS value is not logged).
-std::string fetch_data2(const std::string &dns, const std::string &ps3_elf, const fs::path &target) {
+// <text>, error <text>, done <files> <bytes> <failed>; exit 0 = complete. With same_as (a USRDIR) the program first
+// compares that copy's net18.bin with the server's and, when they are the same, fetches nothing else and prints "same
+// net18.bin" (*same set; issue 50: one small request instead of ~26 MB per import). Returns "" or what went wrong (no
+// addresses: the program prints none, and the DNS value is not logged).
+std::string fetch_data2(const std::string &dns, const std::string &ps3_elf, const fs::path &target, const fs::path &same_as = {},
+                        bool *same = nullptr) {
     const fs::path exe = patcher_dir() / "online" / "uncharted_online.exe";
     if (!is_file(exe)) return "the online program is missing (" + S(exe) + ")";
     std::vector<std::string> fails;
     long long files = 0, done = 0;
     int rc;
     try {
-        rc = run({S(exe), "--fetch-game-data", dns, S(target), ps3_elf}, fs::path(), {}, [&](const std::string &raw) {
+        std::vector<std::string> cmd = {S(exe), "--fetch-game-data", dns, S(target), ps3_elf};
+        if (!same_as.empty()) {
+            cmd.push_back("--same-as");
+            cmd.push_back(S(same_as));
+        }
+        rc = run(cmd, fs::path(), {}, [&](const std::string &raw) {
             const std::string line = strip(raw);
             const size_t sp = line.find(' ');
             const std::string kind = line.substr(0, sp), rest = sp == std::string::npos ? "" : line.substr(sp + 1);
@@ -182,6 +203,8 @@ std::string fetch_data2(const std::string &dns, const std::string &ps3_elf, cons
             } else if (kind == "fail" || kind == "error") {
                 fails.push_back(rest);
                 log("game data: " + line);
+            } else if (kind == "same") {
+                if (same) *same = true;
             } else if (kind == "note" || kind == "start" || kind == "done")
                 log("game data: " + line);
         });
@@ -213,7 +236,19 @@ std::string ensure_data2(Args &a, const fs::path &data, const std::string &ps3_e
         const fs::path fresh = data / "ps3-data2-new", got = fresh / DATA2_ID / "USRDIR" / "net18.bin";
         std::error_code ec;
         fs::remove_all(fresh, ec);
-        const std::string why = fetch_data2(dns, ps3_elf, fresh / DATA2_ID);
+        // the copy the import would read without a download: kept as it is when the server's net18.bin is the same
+        // (its files and their times stay, so nothing is converted again for nothing)
+        const bool own_ok = present(usrdir / "net18.bin") && data2_problems({S(own)}).empty();
+        const fs::path have = own_ok ? usrdir : usable_data2(a.ps3_u3);
+        bool same = false;
+        const std::string why = fetch_data2(dns, ps3_elf, fresh / DATA2_ID, have, &same);
+        if (same && why.empty()) {
+            fs::remove_all(fresh, ec);
+            if (own_ok) a.ps3_u3.insert(a.ps3_u3.begin(), S(own));
+            ev(obj({{"phase", str("data2")}, {"status", str("ok")}, {"note", str("Game data is current.")}}));
+            log("game data: " + S(have) + " is the server's current game data (same net18.bin): nothing downloaded");
+            return "";
+        }
         const std::vector<std::string> left =
             present(got) ? data2_problems({S(fresh)}) : std::vector<std::string>{"no net18.bin was downloaded"};
         if (present(got) && left.empty()) {

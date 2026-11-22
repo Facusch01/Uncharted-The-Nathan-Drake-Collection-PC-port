@@ -2,7 +2,7 @@
 // player's own PS3 copy and converted to the PS4 format, as an overlay folder.
 //
 //   u2import --ps4 <PS4 game folder> --ps3 <PS3 base folder> [--ps3-dlc <PS3 DLC folder>] --out <folder>
-//            [--ps3-data <PS3 game-data folder>] [--groups A,B,C,D,E] [--speech-langs english,french,...] [--dlc-ruins]
+//            [--ps3-data <PS3 game-data folder>] [--dns <IPv4>] [--groups A,B,C,D,E] [--speech-langs english,...] [--dlc-ruins]
 //            [--drop-navmesh] [--only REGEX] [--ps3-elf EBOOT.elf] [--objdump PATH] [--ffmpeg PATH] [--force] [--update] [--validate]
 //        u2import --validate-twins --ps4 <folder> --ps3 <folder> [--ps3-dlc <folder>] --work <folder>   (maintainers)
 //   u2import --shipped-id          the fingerprint of the installed import (the launcher compares it with state.json)
@@ -12,7 +12,9 @@
 //   --ps3-dlc  folder with dlc-map1/2.psarc and dlc-patch*.psarc; without it the map packs (groups C, D) are skipped
 //   --ps3-data the PS3 game-data folder (RPCS3 dev_hdd0/game or a <id>DATA2 folder): net-patch9.bin and the server's
 //              map spawn paks
-//   --out      the "U2 Multiplayer" folder, laid out like Uncharted 3's "U3 Multiplayer":
+//   --dns      the Uncharted 2 community server DNS: the online program (u3mp/patcher/online/uncharted_online.exe
+//              --fetch-game-data-u2) downloads that game data into <out>/ps3-data2/NPUA80698DATA2, read before --ps3-data
+//   --out     the "U2 Multiplayer" folder, laid out like Uncharted 3's "U3 Multiplayer":
 //                <out>/state.json, <out>/import.log
 //                <out>/recipe/work/u2data/build/main/...  the overlay: only converted files and the registries
 //                <out>/recipe/scratch                     caches (removable)
@@ -189,7 +191,7 @@ Value sorted_keys(const Value &v) {
 }
 
 struct Args {
-    std::string ps4, ps3, ps3_dlc, ps3_data, out, groups = "A,B,C,D,E", speech_langs, list, only, ffmpeg, ps3_elf, objdump;
+    std::string ps4, ps3, ps3_dlc, ps3_data, out, groups = "A,B,C,D,E", speech_langs, list, only, ffmpeg, ps3_elf, objdump, dns;
     bool dlc_ruins = false, no_dlc_ruins = false, drop_navmesh = false, no_verify = false, update = false, force = false, validate = false;
 };
 
@@ -560,6 +562,10 @@ private:
     std::string step_fingerprint(const std::string &sid, bool first);
     bool step_outputs_ok(const std::string &sid);
     void step_items();
+    fs::path data2;   // <out>/ps3-data2/NPUA80698DATA2 when it holds usable game data (downloaded): read first
+    std::string fetch_data2(const std::string &elf, const fs::path &target, const fs::path &same_as, bool &same);
+    void ensure_data2(const std::string &elf);
+    std::string data2_digest();
     std::vector<fs::path> ps3_data_roots();
     std::vector<fs::path> ps3_data_candidates();
     std::optional<fs::path> ps3_data_pak22();
@@ -615,6 +621,7 @@ int Importer::run() {
         return finish("failed", {{"error", str(why)}});
     }
     lg("PS3 EBOOT.elf: " + elf);
+    ensure_data2(elf);
     music_refs_ = ps4->music_refs();
     if (!a.speech_langs.empty())
         for (const std::string &l : split(a.speech_langs, ',')) langs.insert(strip(l));
@@ -764,8 +771,27 @@ std::string Importer::step_fingerprint(const std::string &sid, bool first) {
             base_digest = sha256_hex(dumps(both, true));
         }
         h.update(base_digest.data(), base_digest.size());
+        // the game data the net steps read (a download or an RPCS3 folder may change under the same path)
+        const std::string d = data2_digest();
+        h.update(d.data(), d.size());
     }
     return h.hex();
+}
+
+// sha256 over the game-data files the net steps read: net-patch9.bin and the spawn paks (path, size, time)
+std::string Importer::data2_digest() {
+    Value l = Value::object();
+    l.kind = Value::Array;
+    auto add = [&](const fs::path &p) {
+        std::error_code ec;
+        const auto t = fs::last_write_time(p, ec);
+        l.items.push_back(obj({{"path", str(S(p))}, {"size", num(fsize(p))}, {"mtime", num(ec ? 0 : (long long)t.time_since_epoch().count())}}));
+    };
+    if (const auto f = ps3_data_file("net-patch9.bin")) add(*f);
+    if (const auto d = ps3_data_pak22())
+        for (const std::string &f : listdir_sorted(*d))
+            if (ends(f, "-pak-ingame10.pak")) add(*d / P(f));
+    return sha256_hex(dumps(l, true));
 }
 
 // a skipped step must still have its files: the import-list step's converted files and its level lists (the later
@@ -864,6 +890,124 @@ void Importer::step_items() {
     sha1_memo_save(work);
 }
 
+namespace {
+const char *DATA2_ID = "NPUA80698DATA2";   // <out>/ps3-data2/NPUA80698DATA2/USRDIR
+
+// a game-data USRDIR the net steps can use: net-patch9.bin and at least one spawn package
+bool data2_usable(const fs::path &usrdir) {
+    if (!isfile(usrdir / "net-patch9.bin")) return false;
+    const fs::path pak = usrdir / "build" / "main" / "pak22";
+    if (!isdir(pak)) return false;
+    for (const std::string &f : listdir_sorted(pak))
+        if (ends(f, "-pak-ingame10.pak")) return true;
+    return false;
+}
+}  // namespace
+
+// The online program's game-data download: `uncharted_online.exe --fetch-game-data-u2 <dns> <target> <EBOOT.elf>
+// [--same-as <USRDIR>]` writes <target>/USRDIR/... as Uncharted 2 would when it goes online (net-patch9.bin and the
+// maps' spawn packages; where the files come from is the online program's business). Its stdout lines: start, get
+// <path> <got> <total>, file <path> <bytes>, note <path> <text>, fail <path> <text>, error <text>, same net-patch9.bin
+// (the --same-as copy is the server's: nothing else fetched), done <files> <bytes> <failed>; exit 0 = complete. Returns
+// "" or what went wrong (no addresses: the program prints none, and the DNS value is not logged).
+std::string Importer::fetch_data2(const std::string &elf, const fs::path &target, const fs::path &same_as, bool &same) {
+    const fs::path exe = launcher_root() / "u3mp" / "patcher" / "online" / "uncharted_online.exe";
+    if (!isfile(exe)) return "the online program is missing (" + S(exe) + ")";
+    std::vector<std::string> fails, cmd = {S(exe), "--fetch-game-data-u2", strip(a.dns), S(target), elf};
+    if (!same_as.empty()) {
+        cmd.push_back("--same-as");
+        cmd.push_back(S(same_as));
+    }
+    long long files = 0, done = 0;
+    int rc;
+    try {
+        rc = u3imp::run(cmd, fs::path(), {}, [&](const std::string &raw) {
+            const std::string line = strip(raw);
+            const size_t sp = line.find(' ');
+            const std::string kind = line.substr(0, sp), rest = sp == std::string::npos ? "" : line.substr(sp + 1);
+            if (kind == "file") {
+                const size_t k = rest.rfind(' ');
+                const std::string size = k == std::string::npos ? "0" : rest.substr(k + 1);
+                files++;
+                done += std::all_of(size.begin(), size.end(), [](char c) { return c >= '0' && c <= '9'; }) && !size.empty() ? std::stoll(size) : 0;
+                lg("game data: downloaded " + (k == std::string::npos ? rest : rest.substr(0, k)) + " (" + size + " bytes)");
+                event(obj({{"phase", str("data2")}, {"status", str("running")},
+                           {"note", str(fmt("Downloading the game data: %lld files, %lld KB", files, done >> 10))}}));
+            } else if (kind == "fail" || kind == "error") {
+                fails.push_back(rest);
+                lg("game data: " + line);
+            } else if (kind == "same") {
+                same = true;
+            } else if (kind == "note" || kind == "start" || kind == "done") {
+                lg("game data: " + line);
+            }
+        });
+    } catch (const std::exception &e) {
+        return std::string("the online program could not start (") + e.what() + ")";
+    }
+    if (rc == 0) return "";
+    std::string f;
+    for (const std::string &x : fails) f += (f.empty() ? "" : "; ") + x;
+    return f.empty() ? fmt("the online program ended with code %d", rc) : cut(f, 400);
+}
+
+// The game data the net steps read (net-patch9.bin and the maps' spawn packages: what Uncharted 2 GOTY writes to
+// dev_hdd0/game/NPUA80698DATA2 when it goes online). With the Uncharted 2 community server DNS (--dns) the online program
+// downloads the server's current copy at every import and update into <out>/ps3-data2, as the game does each time it
+// goes online: first only net-patch9.bin, compared with the copy the import would read; the rest only when it differs.
+// The download goes to a new folder that replaces the old copy only when it is usable. Without a DNS, or when the
+// download fails, an earlier download or the --ps3-data folder (RPCS3's) is used as before.
+void Importer::ensure_data2(const std::string &elf) {
+    const fs::path own = out / "ps3-data2" / DATA2_ID, usrdir = own / "USRDIR";
+    const bool own_ok = data2_usable(usrdir);
+    if (own_ok) data2 = own;
+    const std::string dns = strip(a.dns);
+    if (dns.empty() || !a.only.empty()) {
+        if (own_ok) lg("game data: using the copy downloaded earlier (" + S(own) + ")");
+        return;
+    }
+    lg("game data: downloading the server's current game data through the Uncharted 2 community server DNS, as "
+       "Uncharted 2 does when it goes online");
+    event(obj({{"phase", str("data2")}, {"status", str("running")}, {"note", str("Downloading the game data...")}}));
+    // the copy the import would read without a download: kept as it is when the server's net-patch9.bin is the same
+    fs::path have = own_ok ? usrdir : fs::path();
+    if (have.empty())
+        if (const auto f = ps3_data_file("net-patch9.bin"); f && data2_usable(f->parent_path())) have = f->parent_path();
+    const fs::path fresh = out / "ps3-data2-new";
+    std::error_code ec;
+    fs::remove_all(fresh, ec);
+    bool same = false;
+    const std::string why = fetch_data2(elf, fresh / DATA2_ID, have, same);
+    if (same && why.empty()) {
+        fs::remove_all(fresh, ec);
+        event(obj({{"phase", str("data2")}, {"status", str("ok")}, {"note", str("Game data is current.")}}));
+        lg("game data: " + S(have) + " is the server's current game data (same net-patch9.bin): nothing downloaded");
+        return;
+    }
+    std::string failed = why;
+    if (data2_usable(fresh / DATA2_ID / "USRDIR")) {
+        ec.clear();
+        fs::remove_all(own, ec);
+        fs::create_directories(own.parent_path(), ec);
+        ec.clear();
+        fs::rename(fresh / DATA2_ID, own, ec);
+        if (!ec && data2_usable(usrdir)) {
+            fs::remove_all(fresh, ec);
+            data2 = own;
+            event(obj({{"phase", str("data2")}, {"status", str("ok")}, {"note", str("Game data downloaded.")}}));
+            lg("game data: downloaded to " + S(usrdir) + (why.empty() ? "" : " (but: " + why + ")"));
+            return;
+        }
+        failed = "the download could not replace " + S(own) + (ec ? " (" + ec.message() + ")" : "");
+        data2 = data2_usable(usrdir) ? own : fs::path();
+    } else if (failed.empty()) {
+        failed = "the download has no net-patch9.bin or no spawn packages";
+    }
+    fs::remove_all(fresh, ec);
+    event(obj({{"phase", str("data2")}, {"status", str("failed")}, {"note", str(cut(failed, 300))}}));
+    lg("game data: the download gave no usable folder (" + cut(failed, 500) + "); using what is on this PC");
+}
+
 // --ps3-data as given, plus (when it is RPCS3's dev_hdd0/game or holds <id>DATA2 folders) the title's own DATA2 folder
 // first and then the other DATA2 folders in it
 std::vector<fs::path> Importer::ps3_data_roots() {
@@ -884,9 +1028,12 @@ std::vector<fs::path> Importer::ps3_data_roots() {
     return roots;
 }
 
-// the data roots, then (from the PS3 folders up to dev_hdd0/game) the title's DATA2 folder and every other DATA2 folder
+// the downloaded game data (ensure_data2), the data roots, then (from the PS3 folders up to dev_hdd0/game) the title's
+// DATA2 folder and every other DATA2 folder
 std::vector<fs::path> Importer::ps3_data_candidates() {
-    std::vector<fs::path> cands = ps3_data_roots();
+    std::vector<fs::path> cands;
+    if (!data2.empty()) cands.push_back(data2);
+    for (const fs::path &r : ps3_data_roots()) cands.push_back(r);
     const std::string title = title_id(a.ps3);
     for (const std::string &root : {a.ps3_dlc, a.ps3}) {
         if (root.empty()) continue;
@@ -904,8 +1051,9 @@ std::vector<fs::path> Importer::ps3_data_candidates() {
     return cands;
 }
 
-// pak22 of the PS3 game-data folder (what PS3 1.10 downloaded from the server). GOTY's own NPUA80698DATA2 has none (the
-// server is offline); the packages are the server's map data, byte-identical in BCUS98123DATA2 and BCES00757DATA2.
+// pak22 of the PS3 game-data folder: the maps' spawn packages the game downloads when it goes online (the import's own
+// download in <out>/ps3-data2, else RPCS3's NPUA80698DATA2 after going online there once; the packages are the server's
+// map data, byte-identical in BCUS98123DATA2 and BCES00757DATA2).
 std::optional<fs::path> Importer::ps3_data_pak22() {
     for (const fs::path &c : ps3_data_candidates())
         for (const std::string sub : {"", "USRDIR", "USRDIR/build/main", "build/main"}) {
@@ -935,7 +1083,7 @@ void Importer::net_spawn_paks() {
         for (const std::string &f : listdir_sorted(*d))
             if (ends(f, "-pak-ingame10.pak")) found.push_back(f);
     if (d) lg("net spawn paks: from " + S(*d) + " (server map data, the same for every PS3 version)");
-    else lg("net spawn paks: no PS3 game-data folder with <map>-pak-ingame10.pak (set --ps3-data): multiplayer maps have no player spawners");
+    else lg("net spawn paks: no PS3 game-data folder with <map>-pak-ingame10.pak (set --dns or --ps3-data): multiplayer maps have no player spawners");
     for (const std::string &f : found) {
         // optional "<digits>-" in front, then "<level>-pak-ingame10.pak"
         std::string n = f;
@@ -985,8 +1133,8 @@ void Importer::net_patch() {
     const std::string key = "dc1/net-patch9.bin", rel = "dc1/ps4/net-patch9.bin";
     const auto src = ps3_data_file("net-patch9.bin");
     if (!src) {
-        set_item(key, "missing", "A", {{"note", str("no PS3 game-data folder with net-patch9.bin (NPUA80698DATA2; set --ps3-data)")}});
-        lg("MISSING " + key + ": no PS3 game-data folder with net-patch9.bin (start the PS3 GOTY once in RPCS3 or set --ps3-data): match start asserts on weapon set 0x8cf8e1cc");
+        set_item(key, "missing", "A", {{"note", str("no PS3 game-data folder with net-patch9.bin (NPUA80698DATA2; set --dns or --ps3-data)")}});
+        lg("MISSING " + key + ": no PS3 game-data folder with net-patch9.bin (set --dns, or start the PS3 GOTY once in RPCS3 and set --ps3-data): match start asserts on weapon set 0x8cf8e1cc");
         return;
     }
     std::string src_sha;
@@ -1317,7 +1465,7 @@ int wmain(int argc, wchar_t **argv) {
         const std::map<std::string, std::string *> vals = {{"--ps4", &a.ps4},         {"--ps3", &a.ps3},       {"--ps3-dlc", &a.ps3_dlc}, {"--ps3-data", &a.ps3_data},
                                                            {"--out", &a.out},         {"--groups", &a.groups}, {"--speech-langs", &a.speech_langs},
                                                            {"--list", &a.list},       {"--only", &a.only},     {"--ffmpeg", &a.ffmpeg},
-                                                           {"--ps3-elf", &a.ps3_elf}, {"--objdump", &a.objdump}};
+                                                           {"--ps3-elf", &a.ps3_elf}, {"--objdump", &a.objdump},  {"--dns", &a.dns}};
         const std::map<std::string, bool *> flags = {{"--dlc-ruins", &a.dlc_ruins}, {"--no-dlc-ruins", &a.no_dlc_ruins}, {"--drop-navmesh", &a.drop_navmesh},
                                                      {"--no-verify", &a.no_verify}, {"--update", &a.update},             {"--force", &a.force},
                                                      {"--validate", &a.validate}};

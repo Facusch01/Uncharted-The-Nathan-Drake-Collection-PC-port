@@ -2105,27 +2105,28 @@ Value page_u2mp(const State &state) {
     std::string ps3 = config_set(state, "u2mp_ps3");
     if (ps3.empty()) ps3 = config_set(state, "u3mp_ps3_u2");   // the folder chosen for Uncharted 3's import
     setup.push_back(label(p + "line:ps3", ps3.empty() ? "None chosen yet." : ps3, DIM, CARD, 9));
-    setup.push_back(row(p + "row:data", "1b. RPCS3's game data folder",
-                        "RPCS3's dev_hdd0/game: it holds the game data Uncharted 2 downloads when it goes online "
-                        "(NPUA80698DATA2). Found by itself when your game folder is inside it.",
+    // 1b: the Uncharted 2 community server DNS (config u2mp_dns; Uncharted 3's page has its own, u3mp_dns)
+    const std::string dns = config_set(state, "u2mp_dns");
+    const std::string dns_clean = strip_spaces(dns);
+    setup.push_back(row(p + "row:dns", "1b. Enter the Uncharted 2 community server DNS",
+                        "Its IPv4 address. The import then downloads the game data Uncharted 2 downloads when it goes "
+                        "online, so you need not go online in RPCS3 first.",
+                        entry_well(p, "dns", dns)));
+    setup.push_back(label(p + "line:dns",
+                          dns_clean.empty() ? "Not set: the game data (NPUA80698DATA2) must then be in RPCS3's dev_hdd0/game "
+                                              "(step 1c)."
+                          : looks_ipv4(dns_clean) ? "Set: the import downloads the game data."
+                                                  : "Not an IPv4 address (four numbers with dots, e.g. 10.0.0.1).",
+                          DIM, CARD, 9));
+    setup.push_back(row(p + "row:data", "1c. RPCS3's game data folder",
+                        "Not needed with the DNS of step 1b. RPCS3's dev_hdd0/game: it holds the game data Uncharted 2 "
+                        "downloads when it goes online (NPUA80698DATA2). Found by itself when your game folder is inside it.",
                         buttons_box(p, "data", {{"choose", "Choose folder"}, {"clear", "Clear"}})));
     const std::string found = mp.get("found") ? text_of(*mp.get("found")) : "";
     setup.push_back(label(p + "line:data",
-                          found.empty() ? "Not found: start Uncharted 2 GOTY once in RPCS3 and enter multiplayer, then choose "
-                                          "RPCS3's dev_hdd0/game folder."
+                          found.empty() ? "Not found: with no DNS in step 1b, start Uncharted 2 GOTY once in RPCS3 and enter "
+                                          "multiplayer, then choose RPCS3's dev_hdd0/game folder."
                                         : found + (config_set(state, "u2mp_ps3_data").empty() ? "  (found by itself)" : ""),
-                          DIM, CARD, 9));
-    // 1c: the community server DNS (config u3mp_dns: one setting for both games and RPCN online play)
-    const std::string dns = config_set(state, "u3mp_dns");
-    setup.push_back(row(p + "row:dns", "1c. Enter the community server DNS",
-                        "Its IPv4 address (the same box as on Uncharted 3's page and under RPCN online play). Online "
-                        "play uses it.",
-                        entry_well(p, "dns", dns)));
-    const std::string dns_clean = strip_spaces(dns);
-    setup.push_back(label(p + "line:dns",
-                          dns_clean.empty() ? "Not set: needed for online play."
-                          : looks_ipv4(dns_clean) ? "Set."
-                                                  : "Not an IPv4 address (four numbers with dots, e.g. 10.0.0.1).",
                           DIM, CARD, 9));
     setup.push_back(row(p + "row:ps3_elf", "2. Choose the decrypted EBOOT",
                         "Required: the decrypted EBOOT.elf of your own copy of the game.",
@@ -2171,7 +2172,8 @@ Value page_u2mp(const State &state) {
                                       "update only what changed is redone.", DIM, CARD, 9));
 
     Value page = array();
-    page.items.push_back(checklist(p, {{"PS3 folder", !ps3.empty()}, {"Game data", !found.empty()}, {"Imported", imported}},
+    page.items.push_back(checklist(p, {{"PS3 folder", !ps3.empty()}, {"Game data", !found.empty() || looks_ipv4(dns_clean)},
+                                       {"Imported", imported}},
                                    "then sign in under RPCN online play"));
     Value set_up = section(p + "setup", "Set up multiplayer", with_separators(std::move(setup)));
     set_up.set("note", Value::text("New here? Do these four steps in order."));
@@ -2193,8 +2195,8 @@ bool act_mp(const char *page, const std::vector<std::string> &buttons, const std
         changes.call.set("name", Value::text(name));
         return true;
     }
-    if (key == "field:dns") {   // U3 step 1b / U2 step 1c, one setting: every edit is saved (the online section follows it)
-        if (kind == "entry") changes.config.set("u3mp_dns", Value::text(value.kind == Value::String ? value.s : ""));
+    if (key == "field:dns") {   // step 1b: every edit is saved (U3's u3mp_dns: the online section follows it; U2's u2mp_dns)
+        if (kind == "entry") changes.config.set(prefix + "dns", Value::text(value.kind == Value::String ? value.s : ""));
         return kind == "entry" || kind == "enter";
     }
     if (prefix == "u3mp_" && kind == "choice" && (key == "voice" || key == "voice_volume")) {
