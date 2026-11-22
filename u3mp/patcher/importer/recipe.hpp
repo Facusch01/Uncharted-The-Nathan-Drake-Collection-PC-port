@@ -56,7 +56,7 @@ void note_read(const fs::path &p);
 }  // namespace u3imp
 
 namespace u3imp {
-// (step id, fingerprint) of every step in ORDER.txt (maintainer checks: the records of an import must match)
+// (step id, fingerprint without the player's inputs) of every step in ORDER.txt (maintainer checks)
 std::vector<std::pair<std::string, std::string>> step_fingerprints();
 }  // namespace u3imp
 

@@ -28,8 +28,9 @@
 // (props, banks, music, DLC character voices), F optional (only with --groups F).
 //
 // The steps run like Uncharted 3's recipe: a step whose fingerprint (this program, the inputs and options, and for the
-// later steps what the first step made) and outputs are unchanged since its last good run is skipped; within a step a
-// converted file whose input SHA-1 and converter version are unchanged is kept. Progress: lines "@U2MP <json>".
+// later steps what the first step made) and outputs are unchanged since its last good run is skipped (the log says why a
+// step runs); within a step a converted file whose input SHA-1 and converter version are unchanged is kept (so a
+// rerun after an update costs about a second). Progress: lines "@U2MP <json>".
 // Nothing is written outside --out.
 #include "u2conv.hpp"
 
@@ -559,7 +560,7 @@ private:
     }
 
     // ---------------------------------------------------------------------------------------------- steps
-    std::string step_fingerprint(const std::string &sid, bool first);
+    std::string step_fingerprint(const std::string &sid, bool first, Value *parts = nullptr);
     bool step_outputs_ok(const std::string &sid);
     void step_items();
     fs::path data2;   // <out>/ps3-data2/NPUA80698DATA2 when it holds usable game data (downloaded): read first
@@ -682,18 +683,33 @@ int Importer::run() {
         event(obj({{"phase", str("recipe")}, {"step", num((long long)(i + 1))}, {"total", num((long long)(steps.size()))}, {"id", str(s.id)}, {"title", str(s.title)},
                    {"status", str("running")}}));
         lg(fmt("[%zu/%zu] %s - %s", i + 1, steps.size(), s.id.c_str(), s.title.c_str()));
-        const std::string fp = step_fingerprint(s.id, s.first);
+        Value parts;
+        const std::string fp = step_fingerprint(s.id, s.first, &parts);
         Value *old = state.get("steps")->get(s.id);
-        if (!a.force && old && text_of(old->get("fp")) == fp && text_of(old->get("status")) == "ok" && step_outputs_ok(s.id)) {
+        // why it runs again (the log says it): what changed since its last good run
+        std::string why;
+        if (a.force) why = "--force";
+        else if (!old) why = "it has not run in this folder before";
+        else if (text_of(old->get("status")) != "ok") why = "its last run ended '" + text_of(old->get("status")) + "'";
+        else if (text_of(old->get("fp")) != fp) {
+            const Value *pp = old->get("parts");
+            for (const auto &[k, words] : std::vector<std::pair<std::string, std::string>>{
+                     {"code", "u2import.exe changed"}, {"options", "the import options or PS3 archives changed"},
+                     {"upstream", s.first ? "the import list changed" : "what the first step made or the game data changed"}})
+                if (!pp || text_of(pp->get(k)) != text_of(parts.get(k))) why += (why.empty() ? "" : ", ") + words;
+        } else if (!step_outputs_ok(s.id))
+            why = "its files are not as the last run left them";
+        if (why.empty()) {
             lg("        no change (already applied)");
             event(obj({{"phase", str("recipe")}, {"id", str(s.id)}, {"status", str("ok")}, {"note", str("no change")}}));
             continue;
         }
+        lg("        runs because " + why);
         const auto t = std::chrono::steady_clock::now();
         try {
             s.fn();
             const double sec = seconds_since(t);
-            Value r = obj({{"fp", str(fp)}, {"status", str("ok")}});
+            Value r = obj({{"fp", str(fp)}, {"status", str("ok")}, {"parts", parts}});
             Value secs;
             secs.kind = Value::Float;
             secs.f = std::round(sec * 10) / 10;
@@ -734,8 +750,9 @@ int Importer::run() {
 }
 
 // sha256 over the step id, this program, the inputs and options, and (first step) the import list or (later steps) what
-// the first step made: its item records and the level lists, taken once right after it
-std::string Importer::step_fingerprint(const std::string &sid, bool first) {
+// the first step made: its item records and the level lists, taken once right after it. parts: the hashes of those
+// three (code, options, upstream), so the log can say which one changed.
+std::string Importer::step_fingerprint(const std::string &sid, bool first, Value *parts) {
     Sha256 h;
     h.update(sid.data(), sid.size());
     h.update("\0", 1);
@@ -753,11 +770,13 @@ std::string Importer::step_fingerprint(const std::string &sid, bool first) {
                             {"navmesh", Value::boolean(a.drop_navmesh)}, {"only", str(a.only)}, {"no_verify", Value::boolean(a.no_verify)}, {"archives", arcs}});
     const std::string o = dumps(opts, true);
     h.update(o.data(), o.size());
+    std::string up;   // what the step builds on
     if (first) {
         std::string t = read_text(P(a.list));
         t.erase(std::remove(t.begin(), t.end(), '\r'), t.end());
         const std::string d = sha256_hex(t);
         h.update(d.data(), d.size());
+        up = d;
     } else {
         if (base_digest.empty()) {
             Value its = Value::object();
@@ -774,7 +793,9 @@ std::string Importer::step_fingerprint(const std::string &sid, bool first) {
         // the game data the net steps read (a download or an RPCS3 folder may change under the same path)
         const std::string d = data2_digest();
         h.update(d.data(), d.size());
+        up = base_digest + d;
     }
+    if (parts) *parts = obj({{"code", str(exe_digest)}, {"options", str(sha256_hex(o))}, {"upstream", str(sha256_hex(up))}});
     return h.hex();
 }
 

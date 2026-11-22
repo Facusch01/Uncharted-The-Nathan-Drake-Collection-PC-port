@@ -35,10 +35,24 @@ Output: `<out>/work/overlay-*` (the overlays), `<out>/work/backup-*` (what the f
 `<out>/scratch/<job>` (rendered job folders), `<out>/_recipe/state.json` + `log.txt`. Re-running on the
 same `--out` skips steps whose recorded outputs are unchanged and steps whose files already equal
 the reference manifest, so updates are incremental. ffmpeg for the steps that say so (`--list`, `needs`).
-A step runs again when its code changes (its fingerprint); a step with `"fingerprint_inputs": ["data2/net18.bin"]`
-also when that input file of the player changes (1.28.0: `netgame-order-119` and `booster-table`, whose result
-follows the server's net18.bin). With a community server DNS the import downloads the server's current game data
-(DATA2) at every import and update, so every PC converts the same version (same net game order, issue 92).
+A step runs again only when something it uses changed (its fingerprint, recorded per part in state.json):
+* `def`: the step file, without the words for people (`title`, `notes`, `status`, `applied`, `family`, versions);
+* `data`: the files of its job folders that are not code (`plan.tsv`, `jobs.tsv`, `data/` ...; not `*.cpp`, `*.hpp`,
+  `*.h`, `*.md`), `tools/dcconv` when a command names `{{DCCONV}}`; a copy step: its list and the speech languages;
+* `code`: for each `u3fix.exe` command, that u3fix step's code id: the package build (`tools/code_ids.cpp`) writes
+  into u3fix.exe a hash of exactly the compiled objects that step runs (the object defining its function and every
+  object it needs, found through the symbols), so a change in another step's code, or a comment, reruns nothing;
+* `inputs`: `"fingerprint_inputs"` (1.28.0: `netgame-order-119` and `booster-table` follow the server's
+  net18.bin), the whole PS3 game data (DATA2) for steps that need it, and the paks a higher overlay hides.
+
+Later steps edit files earlier steps made (net.bin, level and actor paks): a file counts as unchanged when it has the
+hash the last step writing it recorded. A step that runs again first gets fresh copies of its files: the first step
+writing each of them runs again too, and the steps between rerun when they find the file changed (an unchanged step
+finds its own edit already made). The log says for each step why it runs ("runs because its code changed (u3fix
+levels)") or that it is "already applied, unchanged". Records of the previous fingerprint (step file + all files of
+its job folders) are carried over once when that one covered all the code the step runs; otherwise the step runs once.
+With a community server DNS the import downloads the server's current game data (DATA2) when its net18.bin changed,
+so every PC converts the same version (same net game order, issue 92).
 
 Hidden files (1.8.0): the game loads the overlays first-wins (r3, r2, port, mp), so a level or actor pak of a
 lower overlay with the same path as one in a higher overlay is never read. 740 manifest files are hidden that way

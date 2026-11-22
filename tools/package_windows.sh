@@ -157,6 +157,7 @@ u3_import() {   # Uncharted 3's importer, its recipe and tools, and the newest m
     local flags=(-std=c++20 -O2 -municode -I"$fx/dctools" -Ilauncher/native)
     local dir=$obj/u3fix s o objs=()
     mkdir -p "$dir"
+    : > "$dir/objects.txt"
     for s in "$fx/dctools/u3fix.cpp" "$fx/dctools/fixlib.cpp" "$fx/dctools/dc.cpp" "$fx/dctools/eula_box.cpp" "$fx/no-lab/remove_lab.cpp" \
         "$fx/no-rpcn-menu/remove_rpcn_page.cpp" "$fx/netgame-order/netgame_order.cpp" \
         "$fx/enemy-stall/apply_ss_option_defaults.cpp" \
@@ -173,10 +174,19 @@ u3_import() {   # Uncharted 3's importer, its recipe and tools, and the newest m
         "$fx/coop-voice2/apply_coop_vox.cpp" "$fx/dctools/net_edits.cpp" \
         "$fx/coop-audit/apply_shade_npc_paks.cpp" "$fx/inline/facility_collapse.cpp" "$fx/eula-batch/make_eula.cpp" "$fx/wall-emblem/make_emblem.cpp" "$fx/dctools/lab_reg.cpp" "$fx/borneo/borneo_fixes.cpp" "$fx/world-levels/world_levels.cpp" "$fx/london/apply_london.cpp" "$fx/map-lighting/apply_map_lighting.cpp" "$fx/map-colors/apply_mapcolor.cpp" "$fx/map-colors2/apply_mapcolor2.cpp" "$fx/hud-mod-mips/limit_mod_mips.cpp"; do
         o=$dir/${s//\//_}.o
-        "${CXX[@]}" "${flags[@]}" -c "$s" -o "$o"
+        "${CXX[@]}" "${flags[@]}" -MMD -MF "$o.d" -c "$s" -o "$o"
         objs+=("$o")
+        echo "$o $s" >> "$dir/objects.txt"
     done
-    "${CXX[@]}" -municode -static -s -Wl,--gc-sections -Wl,--no-insert-timestamp "${objs[@]}" -o "$out/u3mp/bin/u3fix.exe"
+    # the code id of every u3fix step (tools/code_ids.cpp: a hash of the compiled code that step runs, written into
+    # u3fix.exe): the import reruns a recipe step only when its own code changed, not when any of u3fix.exe changed
+    "${CXX[@]}" -std=c++20 -O2 -municode -static -s -o "$obj/code_ids.exe" tools/code_ids.cpp -lbcrypt
+    llvm-nm -A -P -g "${objs[@]}" > "$dir/nm.txt"
+    "$obj/code_ids.exe" "$fx/dctools/u3fix.cpp" "$dir/objects.txt" "$dir/nm.txt" "$(clang++ --version | head -1)" "$dir/code_ids.cpp" > "$dir/code_ids.log"
+    "${CXX[@]}" "${flags[@]}" -c "$dir/code_ids.cpp" -o "$dir/code_ids.o"
+    "${CXX[@]}" -municode -static -s -Wl,--gc-sections -Wl,--no-insert-timestamp "${objs[@]}" "$dir/code_ids.o" -Wl,-u,u3fix_code_ids \
+        -o "$out/u3mp/bin/u3fix.exe"
+    grep -aq 'U3FIX-CODE-IDS 1' "$out/u3mp/bin/u3fix.exe" || { echo "u3fix.exe carries no code ids" >&2; exit 1; }
     # u3import.exe: the import the launcher runs (u3mp/patcher/importer: the image, the recipe driver, staged updates);
     # it links the launcher's own prepare / module link code for the base image
     local im=u3mp/patcher/importer

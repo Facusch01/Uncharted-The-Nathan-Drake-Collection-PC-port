@@ -75,8 +75,9 @@ Fields:
 * `commands`: argv lists; `u3fix.exe` is the one next to `u3import.exe`. `{{JOB}}` = the rendered job folder,
   `{{OUT}}` = the output root, every placeholder of the table works; an argument `@<file>` is replaced by that
   file's content (for long `--only` lists). `cwd` (optional) overrides the working directory (default `{{JOB}}`).
-  `with_jobs` (optional): other job folders the step's code comes from; `["dctools"]` for every u3fix command (the
-  step's fingerprint covers them, so a change in u3fix's shared code reruns the step at the next update).
+  `with_jobs` (optional): other job folders rendered for the step; their data files (not their code) join its
+  fingerprint. The code a step runs counts through u3fix.exe's code ids (`tools/code_ids.cpp`): a change in the
+  code a u3fix step uses, wherever it lives, reruns it at the next update; nothing else does (RECIPE.md).
   `ok_codes` (default `[0]`; a code other than 0 in the list = an input is missing, the step runs again next time),
   `expect` (a string that must appear in the output), `log_lines`.
 * `writes`: globs (relative to the output root) of the files the step may change; the driver hashes
@@ -104,5 +105,6 @@ Fields:
 ## 4. Updating a user's build
 
 The launcher reruns the import (`u3import.exe`) on the same data folder. Steps already recorded in
-`<out>/_recipe/state.json` whose outputs still match are skipped; new steps run; a step whose
-code changed is rerun with `--force` or `--only <id>`. `--list` shows the current step table.
+`<out>/_recipe/state.json` whose fingerprint and files still match are skipped; new steps and steps whose
+definition, data, code or inputs changed run again (the log says why); `--force` or `--only <id>` reruns by hand.
+`--dry-run` shows what would run and why. `--list` shows the current step table.

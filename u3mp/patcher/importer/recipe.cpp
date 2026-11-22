@@ -10,20 +10,22 @@
 // Output (<out>): work/overlay-*/u3data/... (the overlays), work/backup-* (the steps' backups), scratch/<job>,
 // _recipe/state.json (which steps ran, with the hashes of the files they wrote), _recipe/log.txt.
 //
-// A step is done when it ran with the same code (its fingerprint: the step file and its job folders; for copy steps,
-// its list) and its recorded files are unchanged; a step whose files are all at
-// the reference hashes needs nothing. Step fingerprints and records are those of the Python recipe, so an import made
-// with it continues where it was.
+// A step is done when what it uses is unchanged (its fingerprint, step_fp: the step file, the data files of its job
+// folders, the code ids of the u3fix steps it runs, its inputs) and its recorded files are as the recipe left them; a
+// step whose files are all at the reference hashes needs nothing. Records of the previous fingerprint
+// (legacy_fingerprint, also the Python recipe's) are carried over when it covered all the code the step runs.
 #include "recipe.hpp"
 
 #include "inflate.h"   // launcher/native/inflate.h
 #include "psarc.hpp"   // dctools
 
 #include <windows.h>
+#include <sys/stat.h>
 
 #include <array>
 #include <chrono>
 #include <cstdio>
+#include <ctime>
 #include <fstream>
 #include <mutex>
 #include <set>
@@ -630,21 +632,38 @@ struct State {
         fs::rename(P(S(path) + ".tmp"), path);
     }
     Value *done(const std::string &id) { return d.get("steps")->get(id); }
-    void mark(const std::string &id, const Value &outputs, const std::string &status, const std::string &note = "", const std::string &fp = "") {
-        d.get("steps")->set(id, obj({{"status", str(status)},
-                                     {"when", str(now_text())},
-                                     {"recipe_version", str(recipe_version())},
-                                     {"outputs", outputs},
-                                     {"note", str(note)},
-                                     {"fp", str(fp)}}));
+    // fp = the step's fingerprint, parts = what it is made of (FP_VERSION; recipe.cpp before it recorded only "fp",
+    // made like legacy_fingerprint)
+    void mark(const std::string &id, const Value &outputs, const std::string &status, const std::string &note = "", const std::string &fp = "",
+              const Value &parts = Value()) {
+        Value r = obj({{"status", str(status)},
+                       {"when", str(now_text())},
+                       {"recipe_version", str(recipe_version())},
+                       {"outputs", outputs},
+                       {"note", str(note)},
+                       {"fp", str(fp)}});
+        if (parts.is_object()) {
+            r.set("fpv", num(FP_VERSION));
+            r.set("parts", parts);
+        }
+        d.get("steps")->set(id, r);
         save();
     }
+    static constexpr long long FP_VERSION = 2;
 };
 
-// sha256 of a tool folder's files (relative path + content; text files with \n line ends)
+// the C++ sources built into u3fix.exe (their code counts through the code ids) and notes for people: not step data
+bool code_or_notes(const std::string &f) {
+    for (const char *x : {".cpp", ".hpp", ".h", ".c", ".md"})
+        if (ends(lower(f), x)) return true;
+    return false;
+}
+
+// sha256 of a tool folder's files (relative path + content; text files with \n line ends); data_only: without
+// code_or_notes files (the files a step reads, not the code it runs)
 std::map<std::string, std::string> g_tree_fp;
-std::string tree_fp(const fs::path &folder) {
-    const std::string key = S(folder);
+std::string tree_fp(const fs::path &folder, bool data_only = false) {
+    const std::string key = S(folder) + (data_only ? "|data" : "");
     if (auto it = g_tree_fp.find(key); it != g_tree_fp.end()) return it->second;
     Sha256 h;
     std::function<void(const fs::path &)> walk = [&](const fs::path &dp) {
@@ -661,7 +680,7 @@ std::string tree_fp(const fs::path &folder) {
         std::sort(dirs.begin(), dirs.end());
         std::sort(files.begin(), files.end());
         for (const std::string &f : files) {
-            if (ends(f, ".pyc") || ends(f, ".orig")) continue;
+            if (ends(f, ".pyc") || ends(f, ".orig") || (data_only && code_or_notes(f))) continue;
             const fs::path p = dp / P(f);
             std::string b = read_text(p);
             for (const char *x : {".py", ".sh", ".txt", ".json", ".tsv", ".md", ".cmd", ".c"})
@@ -698,8 +717,21 @@ std::string lf_sha_raw(const fs::path &p) {
 // "fingerprint_inputs": ["data2/net18.bin", ...]: input files whose content the step's result depends on (kind/path of
 // the PS3 input folders); their sha256 joins the fingerprint, so the step runs again when the player's input changes
 // (netgame-order-119 and booster-table follow the server's net18.bin: a newer one gives another net game order).
-// Without inputs (the recipe's shipped fingerprints) only the code counts.
-std::string step_fingerprint(const Value &s, const Inputs *inp) {
+std::string declared_inputs(const Value &s, const Inputs &inp) {
+    std::string out;
+    for (const auto &x : val_list(s, "fingerprint_inputs")) {
+        const size_t k = x.find('/');
+        if (k == std::string::npos) continue;
+        const auto it = inp.ps3.find(x.substr(0, k));
+        const fs::path p = it == inp.ps3.end() ? fs::path() : it->second / P(x.substr(k + 1));
+        out += x + "=" + (!p.empty() && present(p) ? sha256_file(p) : std::string("-"));
+    }
+    return out;
+}
+
+// The fingerprint recipe.cpp recorded before FP_VERSION 2 (and the Python recipe): the whole step file and every file
+// of its job folders, u3fix.exe's sources included. Only used to carry such a record over (rebuild_overlays).
+std::string legacy_fingerprint(const Value &s, const Inputs *inp) {
     Value c = Value::object();
     for (const auto &[k, v] : s.fields)
         if (k.empty() || k[0] != '_') c.set(k, v);
@@ -720,29 +752,149 @@ std::string step_fingerprint(const Value &s, const Inputs *inp) {
             h.update(d.data(), d.size());
         }
     }
-    if (inp)
-        for (const auto &x : val_list(s, "fingerprint_inputs")) {
-            const size_t k = x.find('/');
-            if (k == std::string::npos) continue;
-            const auto it = inp->ps3.find(x.substr(0, k));
-            const fs::path p = it == inp->ps3.end() ? fs::path() : it->second / P(x.substr(k + 1));
-            const std::string d = x + "=" + (!p.empty() && present(p) ? sha256_file(p) : std::string("-"));
-            h.update(d.data(), d.size());
-        }
+    if (inp) {
+        const std::string d = declared_inputs(s, *inp);
+        h.update(d.data(), d.size());
+    }
     return h.hex();
 }
 
-bool outputs_unchanged(const fs::path &out, const Value &rec) {
+// u3fix.exe's code ids: tools/code_ids.cpp writes them into the program when the package is built (the table
+// "U3FIX-CODE-IDS 1\n<step> <id> <folder>,...\n...END\n"): per u3fix step, a hash of exactly the compiled code it runs
+// and the source folders that code is built from
+struct CodeIds {
+    std::string exe;   // sha256 of u3fix.exe ("" when it is not next to u3import.exe)
+    std::map<std::string, std::pair<std::string, std::vector<std::string>>> ids;   // step -> (id, folders)
+};
+const CodeIds &u3fix_code_ids() {
+    static std::optional<CodeIds> c;
+    if (c) return *c;
+    c.emplace();
+    const fs::path p = exe_dir() / "u3fix.exe";
+    if (!is_file(p)) return *c;
+    const std::string b = read_text(p);
+    c->exe = sha256_hex(b);
+    const std::string mark = "U3FIX-CODE-IDS 1\n";
+    const size_t at = b.find(mark), end = at == std::string::npos ? at : b.find("END\n", at);
+    if (end == std::string::npos) return *c;   // a u3fix.exe built without them: its whole file counts
+    for (const std::string &l : split(b.substr(at + mark.size(), end - at - mark.size()), '\n')) {
+        const std::vector<std::string> f = split(l, ' ');
+        if (f.size() == 3) c->ids[f[0]] = {f[1], split(f[2], ',')};
+    }
+    return *c;
+}
+
+// the u3fix steps a recipe step runs (["u3fix.exe", "<step>", ...] commands)
+std::vector<std::string> u3fix_steps(const Value &s) {
+    std::vector<std::string> out;
+    if (const Value *cs = s.get("commands"))
+        for (const Value &c : cs->items)
+            if (c.items.size() > 1 && c.items[0].s == "u3fix.exe") out.push_back(c.items[1].s);
+    return out;
+}
+
+// What a step's result depends on, each part hashed on its own so the log can say what changed:
+//   def     the step file without the words for people (title, notes ...)
+//   data    the files of its job folders that are not code (plan.tsv, jobs.tsv, data/ ...), tools/dcconv when a
+//           command names {{DCCONV}}; a copy step: its list and the speech languages
+//   code    for each u3fix.exe command, that u3fix step's code id (only the code it runs; u3fix.exe's own hash when it
+//           carries no ids)
+//   inputs  "fingerprint_inputs", the PS3 game data (DATA2) when the step reads it, and the paks a higher overlay hides
+// A step reruns when one of them changed. Whatever else a step reads is a PS3 / PS4 game file, fixed for a given
+// copy of the game (checked by sha256 where it matters).
+struct FpEnv {
+    std::string data2;      // data2_digest(), "" without DATA2
+    std::string shadowed;   // sha256 of _recipe/shadowed.tsv and recipe/manifest.tsv
+    std::string langs;      // the speech languages a copy step copies
+};
+struct Fp {
+    std::string def, data, code, inputs;
+    std::string all() const { return sha256_hex(def + "|" + data + "|" + code + "|" + inputs); }
+    Value value() const { return obj({{"def", str(def)}, {"data", str(data)}, {"code", str(code)}, {"inputs", str(inputs)}}); }
+};
+Fp step_fp(const Value &s, const Inputs *inp, const FpEnv &env) {
+    static const std::set<std::string> words = {"title", "notes", "status", "applied", "family", "recipe_version_added", "recipe_version_changed"};
+    Fp f;
+    Value c = Value::object();
+    for (const auto &[k, v] : s.fields)
+        if (!k.empty() && k[0] != '_' && !words.count(k)) c.set(k, v);
+    f.def = sha256_hex(dumps(c, true));
+    std::string data, code, inputs;
+    if (val_s(s, "kind") == "script") {
+        std::vector<std::string> jobs = {val_s(s, "job")};
+        for (const auto &w : val_list(s, "with_jobs")) jobs.push_back(w);
+        for (const auto &jb : jobs) data += jb + "=" + tree_fp(tools_dir() / "fixes" / P(jb), true) + ";";
+        if (const Value *cs = s.get("commands"); cs && dumps(*cs).find("{{DCCONV}}") != std::string::npos)
+            data += "dcconv=" + tree_fp(tools_dir() / "dcconv") + ";";
+        const CodeIds &ids = u3fix_code_ids();
+        for (const std::string &st : u3fix_steps(s)) {
+            const auto it = ids.ids.find(st);
+            code += st + "=" + (it != ids.ids.end() ? it->second.first : "exe:" + ids.exe) + ";";
+        }
+        inputs += "shadowed=" + env.shadowed + ";";
+    } else if (!val_s(s, "list").empty()) {
+        const fs::path p = recipe_dir() / "lists" / P(val_s(s, "list"));
+        if (present(p)) data += "list=" + sha256_hex(lf_sha_raw(p)) + ";";
+        data += "langs=" + env.langs + ";";
+    }
+    if (inp) {
+        inputs += declared_inputs(s, *inp);
+        const auto needs = val_list(s, "needs");
+        if (std::find(needs.begin(), needs.end(), "ps3_data2") != needs.end()) inputs += "data2=" + env.data2 + ";";
+    }
+    f.data = sha256_hex(data);
+    f.code = sha256_hex(code);
+    f.inputs = sha256_hex(inputs);
+    return f;
+}
+
+// sha256 over the PS3 game data folder (DATA2: the server's data, downloaded again when it changes): every file's
+// relative path and sha256; newest = the latest modification time of its files (local time text, as "when")
+std::string data2_digest(const Inputs &inp, std::string *newest) {
+    const auto it = inp.ps3.find("data2");
+    if (it == inp.ps3.end()) return "";
+    std::vector<std::pair<std::string, fs::path>> files;
+    std::error_code ec;
+    for (auto e = fs::recursive_directory_iterator(it->second, ec); !ec && e != fs::recursive_directory_iterator(); e.increment(ec)) {
+        std::error_code e2;
+        if (e->is_regular_file(e2)) files.push_back({rel_of(e->path(), it->second), e->path()});
+    }
+    std::sort(files.begin(), files.end());
+    Sha256 h;
+    std::time_t latest = 0;
+    for (const auto &[rel, p] : files) {
+        const std::string l = rel + "\t" + sha256_cached(p) + "\n";
+        h.update(l.data(), l.size());
+        struct _stat64 st{};
+        if (_wstat64(p.c_str(), &st) == 0) latest = std::max(latest, std::time_t(st.st_mtime));
+    }
+    if (newest) {
+        std::tm tm{};
+        localtime_s(&tm, &latest);
+        char b[32];
+        std::strftime(b, sizeof b, "%Y-%m-%d %H:%M:%S", &tm);
+        *newest = b;
+    }
+    return h.hex();
+}
+
+// a step's recorded files as the recipe left them: the hash the last step writing each file recorded (later steps
+// edit files earlier ones made, so an earlier step's own hash is out of date by design); the first differing file
+std::optional<std::string> changed_output(const fs::path &out, const Value &rec, const std::map<std::string, Value> &final_hash,
+                                          const std::set<std::string> &dirty) {
     if (const Value *o = rec.get("outputs"))
-        for (const auto &[rel, hv] : o->fields) {
+        for (const auto &[rel, own] : o->fields) {
+            const auto fh = final_hash.find(rel);
+            const Value &hv = fh != final_hash.end() ? fh->second : own;
             const fs::path p = out / P(rel);
+            if (dirty.count(rel)) return rel;
             if (hv.kind == Value::Null) {
-                if (present(p)) return false;
+                if (present(p)) return rel;
                 continue;
             }
-            if (!present(p) || sha256_cached(p) != hv.s) return false;
+            if (!present(p) || sha256_cached(p) != hv.s) return rel;
         }
-    return true;
+    return std::nullopt;
 }
 
 // ------------------------------------------------------------------------------------------------ rendering
@@ -1197,6 +1349,106 @@ int rebuild_overlays(const RecipeArgs &a, const std::function<void(const std::st
         for (const auto &x : split(a.only, ',')) only.insert(x);
     if (!a.skip.empty())
         for (const auto &x : split(a.skip, ',')) skip.insert(x);
+    // ---- before anything runs: what each step depends on (step_fp) and why a step runs again
+    FpEnv fenv;
+    std::string data2_newest;
+    fenv.data2 = data2_digest(inp, &data2_newest);
+    fenv.shadowed = sha256_hex(read_text(sf) + "|" + (present(recipe_dir() / "manifest.tsv") ? sha256_file(recipe_dir() / "manifest.tsv") : std::string()));
+    fenv.langs = sl;
+    const Value records = *state.d.get("steps");   // as the last run left them
+    // every recorded file: the steps that wrote it (recipe order) and the hash the last of them recorded
+    std::map<std::string, std::vector<size_t>> writers;
+    std::map<std::string, Value> final_hash;
+    for (size_t i = 0; i < steps.size(); i++) {
+        const Value *rec = records.get(val_s(steps[i], "id"));
+        if (!rec || val_s(*rec, "status") != "ok") continue;
+        if (const Value *o = rec->get("outputs"))
+            for (const auto &[rel, hv] : o->fields) {
+                writers[rel].push_back(i);
+                final_hash[rel] = hv;
+            }
+    }
+    auto missing_inputs = [&](const Value &s) {
+        std::string l;
+        for (const auto &n : val_list(s, "needs")) {
+            bool ok = false;
+            if (n == "ps4") ok = inp.ps4.has_value();
+            else if (n == "ps3_u2") ok = inp.u2.has_value();
+            else if (starts(n, "ps3_")) ok = inp.ps3.count(n.substr(4)) != 0;
+            else if (starts(n, "tool:")) ok = present(tools_dir() / P(n.substr(5)));
+            if (!ok) l += (l.empty() ? "" : ", ") + n;
+        }
+        return l;
+    };
+    struct Plan {
+        Fp fp;
+        std::string reason;   // why it runs again ("" = unchanged)
+        bool carried = false;   // a record of the previous fingerprint that still holds
+    };
+    std::vector<Plan> plan(steps.size());
+    for (size_t i = 0; i < steps.size(); i++) {
+        const Value &s = steps[i];
+        if (val_s(s, "kind") == "unavailable" || !missing_inputs(s).empty()) continue;
+        Plan &pl = plan[i];
+        pl.fp = step_fp(s, &inp, fenv);
+        const Value *rec = records.get(val_s(s, "id"));
+        const std::string status = rec ? val_s(*rec, "status") : "";
+        if (a.force) pl.reason = "--force";
+        else if (!rec) pl.reason = "it has not run in this folder before";
+        else if (status != "ok") pl.reason = "its last run ended '" + status + "'";
+        else if (val_s(*rec, "note") == "files already at the reference state" && !(rec->get("outputs") && rec->get("outputs")->truthy()))
+            pl.reason = "recorded without its files (recipe 1.9.6 or older)";
+        else if (const Value *v = rec->get("fpv"); v && v->i >= State::FP_VERSION) {
+            if (val_s(*rec, "fp") != pl.fp.all()) {
+                const Value *pp = rec->get("parts");
+                std::string what;
+                auto part = [&](const char *k, const std::string &now, const std::string &words) {
+                    if (!pp || val_s(*pp, k) != now) what += (what.empty() ? "" : ", ") + words;
+                };
+                std::string code = "its code changed (u3fix";
+                for (const std::string &st : u3fix_steps(s)) code += " " + st;
+                part("def", pl.fp.def, "its step definition changed");
+                part("data", pl.fp.data, "its job data changed");
+                part("code", pl.fp.code, code + ")");
+                part("inputs", pl.fp.inputs, "its input files changed");
+                pl.reason = what.empty() ? "its fingerprint changed" : what;
+            }
+        } else if (rec->get("fp") && val_s(*rec, "fp") != legacy_fingerprint(s, &inp)) {
+            pl.reason = "updated since it last ran";
+        } else {
+            // a record of the previous fingerprint (step file + all files of its job folders) that still matches: it is
+            // carried over when that fingerprint covered what the step uses now; otherwise the step runs once
+            std::set<std::string> jobs = {val_s(s, "job")};
+            for (const auto &w : val_list(s, "with_jobs")) jobs.insert(w);
+            const CodeIds &ids = u3fix_code_ids();
+            for (const std::string &st : u3fix_steps(s))
+                if (const auto it = ids.ids.find(st); it != ids.ids.end())
+                    for (const std::string &f : it->second.second)
+                        // folders outside tools/fixes (launcher/native: the JSON and inflate headers) were not covered
+                        // either, but have not changed since 2026-11-10, before the first C++ (u3fix) record
+                        if (f.find('/') == std::string::npos && !jobs.count(f) && pl.reason.empty())
+                            pl.reason = "first run with the new fingerprints: its code also comes from tools/fixes/" + f + ", which the old one did not cover";
+            const auto needs = val_list(s, "needs");
+            if (pl.reason.empty() && std::find(needs.begin(), needs.end(), "ps3_data2") != needs.end() && data2_newest > val_s(*rec, "when"))
+                pl.reason = "first run with the new fingerprints: the PS3 game data (DATA2) is newer than its last run";
+            pl.carried = pl.reason.empty();
+        }
+    }
+    // A step that runs again works on fresh copies of the files it wrote: the first step that writes each of them runs
+    // again too (and the steps in between, when they find the file changed). Unchanged steps rerun safely: each one
+    // finds its own edit already made.
+    std::map<size_t, std::string> forced;
+    for (size_t i = 0; i < steps.size(); i++) {
+        if (plan[i].reason.empty()) continue;
+        const Value *rec = records.get(val_s(steps[i], "id"));
+        if (const Value *o = rec ? rec->get("outputs") : nullptr)
+            for (const auto &[rel, hv] : o->fields) {
+                const size_t w = writers[rel].front();
+                if (w != i && plan[w].reason.empty() && !forced.count(w))
+                    forced[w] = "it makes " + rel + ", which " + val_s(steps[i], "id") + " (running again) edits";
+            }
+    }
+    std::set<std::string> dirty;   // --dry-run: the recorded files of the steps that would run
     bool started = a.from.empty();
     int c_ok = 0, c_skipped = 0, c_already = 0, c_failed = 0, c_unavail = 0;
     const auto t_all = std::chrono::steady_clock::now();
@@ -1213,19 +1465,8 @@ int rebuild_overlays(const RecipeArgs &a, const std::function<void(const std::st
             c_skipped++;
             continue;
         }
-        std::vector<std::string> missing;
-        for (const auto &n : val_list(s, "needs")) {
-            bool ok = false;
-            if (n == "ps4") ok = inp.ps4.has_value();
-            else if (n == "ps3_u2") ok = inp.u2.has_value();
-            else if (starts(n, "ps3_")) ok = inp.ps3.count(n.substr(4)) != 0;
-            else if (starts(n, "tool:")) ok = present(tools_dir() / P(n.substr(5)));
-            if (!ok) missing.push_back(n);
-        }
-        if (!missing.empty()) {
-            std::string l;
-            for (const auto &m : missing) l += (l.empty() ? "" : ", ") + m;
-            lg(head + ": SKIP, input not available: " + l);
+        if (const std::string m = missing_inputs(s); !m.empty()) {
+            lg(head + ": SKIP, input not available: " + m);
             c_unavail++;
             continue;
         }
@@ -1234,21 +1475,26 @@ int rebuild_overlays(const RecipeArgs &a, const std::function<void(const std::st
             c_unavail++;
             continue;
         }
+        const Plan &pl = plan[i];
+        const std::string fp = pl.fp.all();
+        const Value parts = pl.fp.value();
+        std::string why = pl.reason;
+        if (why.empty() && forced.count(i)) why = forced[i];
         Value *rec = state.done(sid);
-        const std::string fp = step_fingerprint(s, &inp);
-        if (rec && !rec->get("fp") && val_s(*rec, "status") == "ok") {
-            rec->set("fp", str(fp));   // recorded by recipe <= 1.7.0 (no fingerprints)
-            state.save();
-            rec = state.done(sid);
-        }
-        // recipe <= 1.9.6 recorded a step found at the reference state with no outputs: checked again
-        const bool stale_ref = rec && val_s(*rec, "note") == "files already at the reference state" && !(rec->get("outputs") && rec->get("outputs")->truthy());
-        if (rec && !a.force && val_s(*rec, "status") == "ok" && val_s(*rec, "fp") == fp && !stale_ref && outputs_unchanged(out, *rec)) {
-            lg(head + ": already applied (" + val_s(*rec, "when") + ")");
+        if (why.empty())
+            if (const auto ch = changed_output(out, *rec, final_hash, dirty)) why = "its file " + *ch + " is not as the last run left it";
+        if (why.empty()) {
+            if (!a.dry_run && (pl.carried || !rec->get("fpv"))) {   // recorded with the previous fingerprint: now with this one
+                rec->set("fp", str(fp));
+                rec->set("fpv", num(State::FP_VERSION));
+                rec->set("parts", parts);
+                state.save();
+                rec = state.done(sid);
+            }
+            lg(head + ": already applied, unchanged since " + val_s(*rec, "when") + (pl.carried ? " (fingerprint carried over)" : ""));
             c_already++;
             continue;
         }
-        if (rec && val_s(*rec, "status") == "ok" && val_s(*rec, "fp") != fp) lg(head + ": updated since it last ran, running it again");
         // "reference_check": false = a step newer than manifest.tsv: its files at the reference state still need it
         if (kind == "script" && !a.force && val_b(s, "reference_check", true)) {
             const std::vector<std::string> pats = val_list(s, "writes");
@@ -1273,24 +1519,28 @@ int rebuild_overlays(const RecipeArgs &a, const std::function<void(const std::st
                 }
             }
             if (okref) {
-                state.mark(sid, ref, "ok", "files already at the reference state", fp);
+                if (!a.dry_run) state.mark(sid, ref, "ok", "files already at the reference state", fp, parts);
                 lg(head + ": already at the reference state (manifest hashes match)");
                 c_already++;
                 continue;
             }
         }
         if (a.dry_run) {
-            lg(head + ": would run");
+            lg(head + ": would run, because " + why);
+            if (rec)
+                if (const Value *o = rec->get("outputs"))
+                    for (const auto &[rel, hv] : o->fields) dirty.insert(rel);
             continue;
         }
         const auto t0 = std::chrono::steady_clock::now();
         lg(head + " ...");
+        lg("        runs because " + why);
         try {
             Value outputs;
             if (kind == "copy-list") outputs = step_copy_list(s, inp, out, langs, lg);
             else if (kind == "script") outputs = step_script(s, inp, out, values, env, lg);
             else throw u3::Stop("unknown step kind '" + kind + "'");
-            state.mark(sid, outputs, "ok", "", fp);
+            state.mark(sid, outputs, "ok", "", fp, parts);
             lg(fmt("        ok  %zu file(s)  %.1f s", outputs.fields.size(), std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count()));
             c_ok++;
         } catch (const InputMissing &e) {
@@ -1318,7 +1568,7 @@ int rebuild_overlays(const RecipeArgs &a, const std::function<void(const std::st
 namespace u3imp {
 std::vector<std::pair<std::string, std::string>> step_fingerprints() {
     std::vector<std::pair<std::string, std::string>> out;
-    for (const Value &s : load_steps([](const std::string &) {})) out.push_back({val_s(s, "id"), step_fingerprint(s, nullptr)});
+    for (const Value &s : load_steps([](const std::string &) {})) out.push_back({val_s(s, "id"), step_fp(s, nullptr, FpEnv{}).all()});
     return out;
 }
 }  // namespace u3imp
