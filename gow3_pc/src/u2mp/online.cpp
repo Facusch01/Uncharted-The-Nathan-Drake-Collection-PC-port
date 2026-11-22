@@ -275,7 +275,9 @@ struct Invite {
 std::vector<Invite> invites;
 std::string sent_presence;     // status + data last published
 double next_presence = 0;
-char friend_text[64][128];
+// Party Up rows: up to kMaxFriends friends (PS3 PSN allowed 100), then up to kMaxRequests requests each way
+constexpr int kMaxFriends = 250, kMaxRequests = 32, kMaxFriendRows = kMaxFriends + 2 * kMaxRequests;
+char friend_text[kMaxFriendRows][128];
 char invite_text[16][128];
 
 // rankings (RPCN score boards; PS3 NP Score)
@@ -679,7 +681,7 @@ void back_to_multiplayer_page() {
 void refresh_friends() {
     if (!api.friends) return;
     friends_dirty = false;
-    const int n = std::min(api.friends(nullptr, 0), 64);
+    const int n = std::min(api.friends(nullptr, 0), kMaxFriends);
     friend_list.assign(size_t(std::max(n, 0)), U2oFriend{});
     if (n > 0) api.friends(friend_list.data(), n);
     for (int in = 1; in >= 0; --in) {
@@ -687,7 +689,7 @@ void refresh_friends() {
         v.clear();
         char names[2048] = {};
         api.friend_requests(in, names, int(sizeof names));
-        for (const char *p = names; *p && p < names + sizeof names && v.size() < 32; p += std::strlen(p) + 1) v.push_back(p);
+        for (const char *p = names; *p && p < names + sizeof names && v.size() < size_t(kMaxRequests); p += std::strlen(p) + 1) v.push_back(p);
     }
 }
 
@@ -1752,7 +1754,7 @@ bool promote(uint32_t net_id) {
 // Rows: the friends (online first), then friend requests to us, then ours still waiting.
 int friend_count() {
     if (!api.on || link_state != U2O_READY) return 0;
-    return int(std::min<size_t>(friend_list.size() + requests_in.size() + requests_out.size(), 64));
+    return int(std::min<size_t>(friend_list.size() + requests_in.size() + requests_out.size(), size_t(kMaxFriendRows)));
 }
 
 int friend_kind(int i) {
@@ -1772,7 +1774,7 @@ std::string request_name(int i) {
 }
 
 const char *friend_row(int i) {
-    if (i < 0 || i >= 64) return "";
+    if (i < 0 || i >= kMaxFriendRows) return "";
     if (friend_kind(i) == kRowRequestIn) {
         std::snprintf(friend_text[i], sizeof friend_text[i], "%.20s - Friend request", request_name(i).c_str());
         return friend_text[i];

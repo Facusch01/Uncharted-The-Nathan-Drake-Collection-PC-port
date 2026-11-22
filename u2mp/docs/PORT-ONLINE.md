@@ -157,7 +157,8 @@ Friend requests (ABI 2, `u2o_friend_requests` / `u2o_add_friend` / `u2o_remove_f
 RemoveFriend 9 through the launcher's session): Party Up lists the requests to us ("Friend request": Add Friend /
 Decline) and ours ("Request sent": Cancel) after the friends; every friend row also has View Profile (name, state,
 presence; PS3 sceNpProfileCallGui) and Remove Friend. Our own popup callbacks are registered in the menu callback
-table (remaining.cpp).
+table (remaining.cpp). Party Up holds up to 250 friends (PS3 PSN allowed 100) and 32 requests each way (online.cpp
+`kMaxFriends`, `kMaxRequests`); RPCN itself has no friend limit and sends the whole list at sign-in.
 
 ## 5b. Host migration in a running match
 
