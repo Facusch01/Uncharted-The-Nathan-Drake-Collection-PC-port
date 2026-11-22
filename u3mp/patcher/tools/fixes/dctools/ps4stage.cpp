@@ -673,6 +673,19 @@ void collapse_far_shell(const std::string &stage, size_t proto, uint32_t chunk, 
     }
 }
 
+// The pass-exclusion word (+0x24) of a shadow-only blocker submesh: bit 0x1 leaves it out of the rain / snow occluder
+// depth map, bit 0x100 out of the surface-reflection pass. Retail's own blockers by material: the general blocker
+// boxes (general/shadowblocker, -double) keep both passes (0), so a roof box still keeps snow and rain off the ground
+// under it (Facility's hangar); canopy shadows only leave the reflection pass (0x100); the library blockers, the
+// layout-texture ones and ik-only blockers leave both (0x101). 'pml' is the PS3 material name in lower case
+uint32_t blocker_pass_flags(uint32_t shadow_only, const std::string &pml) {
+    if (!shadow_only) return 0;
+    if (shadow_only != 0x10000) return 0x101;   // ik-only
+    if (pml.compare(0, 21, "general/shadowblocker") == 0) return 0;
+    if (has(pml, "canopy-shadow")) return 0x100;
+    return 0x101;
+}
+
 // An instance submesh merges up to MAX_BLOCKS PS3 blocks and gets the "own lightmap UVs" flag (0x100) when any of them
 // has lightmap UVs. A triangle whose three corners all have zero lightmap UVs (the half-float components' maximum is 0)
 // then samples lightmap texel (0, 0) instead of its vertex light: Airstrip's black floor. Such a submesh keeps vertex
@@ -2132,7 +2145,7 @@ Bytes convert_once(const Pak &p, const std::string &stage, const Plan &plan, con
                 const auto lm = std::find_if(ist.begin(), ist.end(), [](const StreamIn &s) { return s.slot == 5; });
                 if (lmf && lm != ist.end() && zero_lightmap_triangle(rr.tri, rr.nv, lm->data)) lmf = false;   // see zero_lightmap_triangle
                 is.flags = ((lmf && !lm_entries.empty()) ? 0x100 : 0) | sbf;
-                is.flags2 = sbf ? 0x101 : 0;
+                is.flags2 = blocker_pass_flags(sbf, pml);   // see blocker_pass_flags
                 ins.subs.push_back(is);
             }
             if (skinned)

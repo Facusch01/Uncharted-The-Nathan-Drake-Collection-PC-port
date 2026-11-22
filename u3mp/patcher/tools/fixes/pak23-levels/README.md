@@ -66,3 +66,16 @@ Each rule checked against the PS3 levels (their textures and material texture li
 A moving PS3 material (scroll / flow) keeps its scroll first: the three planner terms do not apply to it. Render classes
 (blend / cut-off / two-sided) are unchanged. Open: san-upper-multi-stage is a retail pak (method windoff) and keeps its
 resident copies.
+
+## Soft blends, water reflections, cut-out maps (2026-11-22)
+
+Checked against the PS3 levels (fragment programs, material textures and constants, render states, WATER_DATA kinds):
+
+| rule | where | effect (113 level paks with a PS3 source) |
+|---|---|---|
+| a PS3 layer blend with a softness (the program divides the blend-map term by 2s + 0.01) needs a template with BLEND_FACTOR_SOFTNESS; without it the layer edge is a hard step and the blend map shows as black-and-white blotches (Facility's frozen ship and walls). Hard-edge PS3 programs are not asked for one | `stageplan.cpp` `soft_blend_score` | PS3 soft blends on a softness template 3208 -> 3367 of 3396 (Facility 37 -> 60 of 60, co-op Monastery cloister 23 -> 40, Highrise 80 -> 93, Graveyard 76 -> 88, Museum 43 -> 54) |
+| a PS3 water program reflects its own '-env-reflection' cube: the water template needs a g_tNdFetchEnvCubeMap slot (ps4stage binds the PS3 cube), else the surface draws as its dark refraction colour (Museum's fountain: flat black). A template of another surface kind of the same class (4 / 5 mesh, 7 / 8 grid, 9 displacement) fits; a PS3 diffuse colour layer (algae) is kept first | `water_env_ok`, `water_class_ok`, `water_diffuse_ok` (the water template key) | PS3 env-cube waters with the cube bound 18 -> 21 of 27 (Museum's three basins); the 6 left are algae pools (Oasis, Dig co-op) whose colour + mask layer no env-cube template carries |
+| an alpha-tested or blending PS3 material whose alpha is its own '-trans' map needs a template with a transparency-map slot; a template cutting by the colour map's alpha (opaque BC1 here) draws the cut-out parts solid (gate lattices) | `trans_map_score` | cut-out materials reading the PS3 '-trans' map 560 -> 564 of 576 (Facility's gate and girders, the ornate gates of Ruins and the co-op Monastery cloister) |
+| a shadow-only blocker submesh's pass-exclusion word (+0x24: 0x1 = left out of the rain / snow occluder depth map, 0x100 = left out of the surface-reflection pass) follows retail's blockers by material: general/shadowblocker boxes 0 (a roof box keeps snow and rain off the ground under it: Facility's hangar box Prototype114.Submesh17 was 0x101), canopy shadows 0x100, library / layout / ik-only blockers 0x101 | `ps4stage.cpp` `blocker_pass_flags` | 66 stage rows (Facility, Fort, Airstrip, Chateau, Dig, Museum, Village, Warzone, Shambhala, co-op levels) |
+
+Trade-off: the softness templates near some PS3 materials have no specular layers, so PS3 material textures bound 29050 -> 28990 of 30152 (107 lost, 66 of them on the co-op Monastery floors and walls: 83 spec masks, 12 second normal maps; 47 gained). Render classes unchanged. 154 stage rows rehashed, built together with the fix-up steps folded into the converter; 66 again for the blocker pass flags.

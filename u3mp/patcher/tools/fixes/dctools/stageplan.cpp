@@ -699,6 +699,7 @@ struct M3 {
     size_t ns3 = 0;                    // PS3 constants minus the generic ones
     bool ov = false;                   // the PS3 material has an overlay layer (overlay_pairs)
     bool soft3 = false;                // the PS3 material sets g_blendSoftness_blendOffset_linearBlendOffset
+    bool softblend3 = false;           // ... and its program blends the layers softly (see soft_blend_score)
     bool spec3 = false, env3 = false;  // the PS3 program adds specular light (g_specularBrightness > 0); and an env map
                                        // reflection (an env texture and g_specularEnvironmentStrength > 0)
     bool fres3 = false;                // the PS3 material sets g_fresnel* constants (the PS3 glass programs)
@@ -707,6 +708,20 @@ struct M3 {
     unsigned uvfar = 0;                // bit d: g_uvScale<d> at least 1.5x away from 1 (a tiling only a UV_d scale carries)
     std::unordered_map<size_t, int> cache;   // feature set id -> v2 + v2.3 score
 };
+
+// U3: a PS3 layer blend with a softness (the program divides the blend-map term by 2s + 0.01, s the material's
+// g_blendSoftness: a soft ramp between the layers) on a template without BLEND_FACTOR_SOFTNESS draws the layer edge as a
+// hard step: the blend map shows as black-and-white blotches (Facility's frozen ship hull and wall / floor wear). Retail
+// keeps the softness on 78% of its blend-map + vertex-colour templates; a hard-edge PS3 program (fp::hard_blend) is
+// not asked for one (ps4stage sets its softness to 0)
+int soft_blend_score(const M3 &m, const SMat &sm) { return m.softblend3 && !sm.soft ? -14 : 0; }
+// U3: an alpha-tested or blending PS3 material whose alpha is its own '-trans' map, on a template without a
+// transparency-map slot (it cuts by the colour map's alpha, and the PS3 colour maps of such materials are opaque BC1):
+// the cut-out parts draw solid (Facility's gate lattice, wooden lattices and grates)
+int trans_map_score(const M3 &m, const SMat &sm, const FeatSet &f) {
+    if (g_u2 || !(m.r3 & R_TRANS) || !(m.c3 & (C_CUT | C_BLEND))) return 0;
+    return (sm.r4 & R_TRANS) || f.tmap ? 0 : -30;
+}
 
 int v2_v23(const M3 &m, const FeatSet &f) {
     int pen = 0;
@@ -815,6 +830,43 @@ std::set<std::string> split_names(const std::vector<std::string> &names) {
             out.insert(k);
     }
     return out;
+}
+
+// U3: a PS3 water program reflects the material's own env cube (it samples the '-env-reflection' .dds with the reflected
+// view vector and adds it to the refraction); a water.fx template without an env-cube slot (g_tNdFetchEnvCubeMap)
+// drops that reflection, and the surface draws as its dark refraction colour (Museum's fountain basin: flat black).
+// Such a PS3 material takes a template with the slot first (ps4stage binds the PS3 cube to it)
+bool water_env_ok(const std::vector<std::string> &texnames, const std::set<std::string> &tbinds) {
+    if (g_u2) return true;
+    bool env3 = false;
+    for (const std::string &n0 : texnames) {
+        const std::string n = lower(n0);
+        env3 = env3 || (ends_with(n, ".dds") && has(n, "env"));
+    }
+    return !env3 || tbinds.count("g_tNdFetchEnvCubeMap") != 0;
+}
+// a PS3 water material with a diffuse colour layer (the algae of Oasis' and Dig's pools: a '<stem>-color' map with its
+// '<stem>-mask') keeps a template with g_tDiffuseColorMap before the env cube (no retail water template has both; the
+// colour layer is the larger visible part). Other '-color' maps in a water material's list (Syria's puzzle-room water
+// lists wall colours it does not draw) are no diffuse layer
+bool water_diffuse_ok(const std::vector<std::string> &texnames, const std::set<std::string> &tbinds) {
+    std::set<std::string> col, msk;
+    for (const std::string &n0 : texnames) {
+        const std::string n = lower(n0);
+        if (has(n, "foam")) continue;
+        if (const size_t k = n.rfind("-color."); k != std::string::npos) col.insert(n.substr(0, k));
+        if (const size_t k = n.rfind("-mask."); k != std::string::npos) msk.insert(n.substr(0, k));
+    }
+    bool d3 = false;
+    for (const std::string &s : col) d3 = d3 || msk.count(s);
+    return d3 == (tbinds.count("g_tDiffuseColorMap") != 0);
+}
+// U3: the class of a WATER_DATA surface kind: 4 / 5 mesh surfaces, 7 / 8 grid surfaces, 9 displacement. A template
+// retail draws on another kind of the same class fits the surface (Museum's fountain basins are kind 4, and the two
+// retail kind-4 templates have no env cube: a kind-5 mesh template carries it); a grid program on a mesh does not
+int water_kind_class(int64_t kind) { return kind == 4 || kind == 5 ? 1 : kind == 7 || kind == 8 ? 2 : kind == 9 ? 3 : 0; }
+bool water_class_ok(int64_t kind3, const json::Value *tkind) {
+    return !g_u2 && tkind && water_kind_class(kind3) != 0 && water_kind_class(kind3) == water_kind_class(tkind->i);
 }
 
 int water_score(const std::vector<std::string> &p3names, const std::vector<std::string> &texnames, const std::vector<std::string> &tparams,
@@ -1063,7 +1115,7 @@ Plan make_plan(const fs::path &ps3path, const fs::path &res, const fs::path &wat
                     std::vector<std::string> p3names;
                     for (const auto &[k, v] : p3_of(n)) p3names.push_back(k);
                     const std::string *bestk = nullptr;
-                    std::tuple<bool, int, int, int, int64_t, std::string> bestkey;
+                    std::tuple<bool, bool, bool, bool, int, int, int, int64_t, std::string> bestkey;
                     const auto wk = wkind.find(n);
                     std::set<std::string> tb(tx3.begin(), tx3.end());
                     for (const auto &[k, c] : cands) {
@@ -1092,7 +1144,9 @@ Plan make_plan(const fs::path &ps3path, const fs::path &res, const fs::path &wat
                         // and Museum's open sea wrong
                         const json::Value *tk = t.get("kind");
                         const bool same_kind = wk == wkind.end() || !tk || tk->i == int64_t(wk->second);
-                        const auto key = std::make_tuple(same_kind, s, tov, common, -int64_t(pi == psz.end() ? 0 : pi->second), k);
+                        const bool kind_ok = same_kind || (wk != wkind.end() && water_class_ok(int64_t(wk->second), tk));
+                        const auto key = std::make_tuple(kind_ok, g_u2 || water_diffuse_ok(tx3, tbinds), water_env_ok(tx3, tbinds), same_kind, s, tov,
+                                                         common, -int64_t(pi == psz.end() ? 0 : pi->second), k);
                         if (!bestk || key > bestkey) {
                             bestk = &k;
                             bestkey = key;
@@ -1335,6 +1389,7 @@ Plan make_plan(const fs::path &ps3path, const fs::path &res, const fs::path &wat
                 if (!need.empty() && std::find(m.scr3.begin(), m.scr3.end(), need) == m.scr3.end()) m.scr3.push_back(need);
                 if (k == "g_colorTint2" || k == "g_colorBrightness2" || k == "g_blendSoftness_blendOffset_linearBlendOffset") m.two3 = true;
                 if (k == "g_blendSoftness_blendOffset_linearBlendOffset") m.soft3 = true;
+                if (k == "g_blendSoftness_blendOffset_linearBlendOffset" && !g_u2) m.softblend3 = !fp::hard_blend(progs3, n);
                 int d;
                 if (colp(k, d)) {
                     bool strong = false;
@@ -1485,6 +1540,8 @@ Plan make_plan(const fs::path &ps3path, const fs::path &res, const fs::path &wat
                 auto ci = m.cache.find(sm.fsid);
                 if (ci == m.cache.end()) ci = m.cache.emplace(sm.fsid, v2_v23(m, S->fsets[sm.fsid])).first;
                 score += ci->second;
+                score += soft_blend_score(m, sm);
+                score += trans_map_score(m, sm, S->fsets[sm.fsid]);
                 score -= 2 * popc(sm.r4 & ~r3);
                 const int64_t score2 = int64_t(score) * 2 + (used[c.pak] > 0 ? 1 : 0);
                 if (!best || std::make_pair(score2, -int64_t(c.size)) > std::make_pair(best->score2, best->negsz)) best = Best{score2, -int64_t(c.size), &k, &c};
