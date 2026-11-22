@@ -546,8 +546,11 @@ number of use U (0 when U ≥ 64) written in W bits (W of 3.8), and ec[69] += 1 
   4. LS = RES; depth check;
   5. write 2 bits: 1 for mode 2, 2 for mode 6, 0 for every other mode;
   6. when WT is not the pattern of 1.0: write the low 8 bits of `u3x_ppc_ctiwz(WT × 255.0)`.
-- Kind 0xa, not dropped: depth check; write code 3, sub-code 0; BACK = LS − its pose slot (32-bit wrap); when any
-  of bits 2 to 31 of BACK is set: ec[69] += 1; write the low 2 bits of BACK. (LS and D stay.)
+- Kind 0xa, not dropped: depth check; BACK = LS − its pose slot (32-bit wrap). When the low 2 bits of BACK are
+  above D − 1 (as unsigned 32-bit numbers; D = 0 never is) nothing is written (v7.239: the receiver could not reach
+  that slot; PS4 NPC command lists give such a reference after commands beyond the layer limit were left out).
+  Else: write code 3, sub-code 0; when any of bits 2 to 31 of BACK is set: ec[69] += 1; write the low 2 bits of
+  BACK. (LS and D stay.)
 - Kind 0x1a: C += 1.
 - Kind 0x19 with layer id ID: when PL or ID is 0x7339d08c ("base"): write code 3, sub-code 2 (also when the new
   layer is muted). Then C = 0, L += 1, muted is set from ID, PL = ID.

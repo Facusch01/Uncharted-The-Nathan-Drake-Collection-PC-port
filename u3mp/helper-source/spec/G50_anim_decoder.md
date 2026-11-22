@@ -310,8 +310,9 @@ Repeat while the visitor's abort flag is clear and the current sub code is not 1
    e. If the reader's error word is set: error 1; stop.
    f. `u3x_v_blend(visitor, weight, a, b, into, mode)` (with the slot numbers computed before the change of D).
 
-   **Code 3, sub 0**: read the 2-bit "back" value d. If D − 1 < d as unsigned 32-bit numbers: error 5; stop.
-   Else `u3x_v_sub0(visitor, D − d − 1)`. (D = 0 never gives the error: D − 1 wraps to the largest number.)
+   **Code 3, sub 0**: read the 2-bit "back" value d. If D − 1 < d as unsigned 32-bit numbers: nothing (v7.239; the
+   PS3 decoder only asserts here, and stopping gave up whole NPC states). Else `u3x_v_sub0(visitor, D − d − 1)`.
+   (D = 0 never skips: D − 1 wraps to the largest number.)
    **Sub 2**: `u3x_v_sub2(visitor)`. **Sub 3**: `u3x_v_sub3(visitor, D)`, then D += 1.
    **Sub 4**: D −= 1, then `u3x_v_sub4(visitor)`. **Sub 6, 7** (and sub 5 is handled above): nothing.
 
@@ -363,7 +364,7 @@ Decoder:
    stub) and without (phase 0, null anim passed on).
 9. Blends: code 0 and 1, the four order / target combinations (depth change only for the lower target), modes 0
    to 3, weights 0, 1, 254, 255; blend at depth 0 and 1 (error 2).
-10. Sub 0 with d = 0..3 at depths 0 to 4 (error 5 and the wrap at depth 0); sub 2, 3, 4 (depth 0 wrap), 6, 7;
+10. Sub 0 with d = 0..3 at depths 0 to 4 (skipped when deeper than the stack, and the wrap at depth 0); sub 2, 3, 4 (depth 0 wrap), 6, 7;
     marker anim (a7 passed on).
 11. Truncation at every bit position of a longer stream: error 1 exactly once, the calls made before it, the
     final `ec[101]`.
