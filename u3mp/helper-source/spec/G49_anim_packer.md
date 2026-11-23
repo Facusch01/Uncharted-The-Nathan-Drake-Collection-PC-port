@@ -262,7 +262,7 @@ writer 0x7befc0 appends (the game's reader 0x7bf430 on the other side takes it b
 
 | Code | Meaning | What follows |
 |---|---|---|
-| 2 | animation, or pose snapshot | [entry number, W bits, unless "one entry per use"], then the phase: 4, 8 or 16 bits by the animation's frame count (a snapshot: 4 bits, value 0) |
+| 2 | animation, or pose snapshot | [entry number, W bits, unless "one entry per use"], then the phase: 4, 8 or 16 bits by the animation's frame count (a snapshot: value 0 in the same width, v7.242) |
 | 3, 5 | mirrored animation | as code 2 |
 | 3, 3 | empty pose | nothing |
 | 0 | blend with a weight | [1 bit order], [1 bit which input slot is the result], 2 bits mode, 8 bits weight × 255 |
@@ -533,7 +533,7 @@ number of use U (0 when U ≥ 64) written in W bits (W of 3.8), and ec[69] += 1 
   - Q = `u3x_ppc_ctiwz((PH × scale) ÷ (float(F) − 1.0))`. (F = 1 divides by zero: the conversion's special cases
     decide the bits. Integer to float is exact here.)
   - D += 1; write the low bits of Q in that width; U += 1.
-- Kind 0xc, not dropped: depth check; LS = its pose slot; write code 2; entry field; D += 1; write 4 bits 0;
+- Kind 0xc, not dropped: depth check; LS = its pose slot; write code 2; entry field; D += 1; write 0 in the width the reader uses for that entry's animation (v7.242: 4, 8 or 16 bits by its frame count, as for kind 8; the animation is entry E's index in table `tabs[group]` when its group code is below 7, else 4 bits; PS3 wrote a fixed 4, too few when a PS4 pose animation has more than 8 frames);
   U += 1.
 - Kind 0xd, not dropped: depth check; LS = its pose slot; write code 3, sub-code 3; D += 1.
 - Kind 9 (blend). It is left out when muted, or when D < 2, or when C ≥ `param6` unless (0 ≤ L < 36 and C equals
