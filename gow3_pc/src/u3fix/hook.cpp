@@ -89,6 +89,7 @@ extern "C" int u3fix_install(unsigned char *image, uint64_t size) {
     applied += u3fix::install_package_log(image, size) ? 1 : 0;
     applied += u3fix::install_counter_wait_log(image, size) ? 1 : 0;
     applied += u3fix::install_job_trace(image, size) ? 1 : 0;   // before the safety net: it counts the jobs
+    applied += u3fix::install_counter_keep(image, size) ? 1 : 0;   // after job_trace: it reads its job counts
     applied += u3fix::install_stuck_counter(image, size) ? 1 : 0;
     applied += u3fix::install_job_queue_full_log(image, size) ? 1 : 0;
     applied += u3fix::install_audio_mix_direct(image, size) ? 1 : 0;

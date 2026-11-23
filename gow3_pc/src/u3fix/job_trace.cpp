@@ -306,6 +306,11 @@ int64_t pending_jobs(const void *counter) {
     return i < 0 ? -1 : g_pending[i].load(std::memory_order_acquire);
 }
 
+void forget_pending_jobs(const void *counter) {
+    const int i = slot_of(counter);
+    if (i >= 0) g_pending[i].store(0, std::memory_order_release);
+}
+
 uint32_t counter_trouble(const void *counter, uint32_t *life) {
     const int i = slot_of(counter);
     if (i < 0) return 0;

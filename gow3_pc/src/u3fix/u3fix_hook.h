@@ -47,6 +47,11 @@ bool install_job_trace(unsigned char *image, uint64_t size);
 void counter_story(const void *counter, char *out, size_t size);
 // jobs submitted on the counter that have not finished (-1: not a pool counter or no trace)
 int64_t pending_jobs(const void *counter);
+// the counter's counted jobs are not coming: counter_keep.cpp gives it back after its wait cap
+void forget_pending_jobs(const void *counter);
+// a job counter given back while jobs counted on it have not finished stays out of the pool until they have, at most
+// 2 s (counter_keep.cpp)
+bool install_counter_keep(unsigned char *image, uint64_t size);
 // what went wrong in the counter's current life (CounterTrouble bits); life: how many times it was made
 enum CounterTrouble : uint32_t {
     kCounterReused = 1,      // made while jobs counted on its last life were unfinished
