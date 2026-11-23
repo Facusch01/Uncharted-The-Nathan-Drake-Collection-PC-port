@@ -42162,23 +42162,35 @@ extern "C" U3X_FN int u3x_gt_base_header(uintptr_t base, uint8_t *sub, void *b) 
     return fresh ? 1 : 0;
 }
 
-// 4.8: expired events leave the queue of unreliable events
-extern "C" U3X_FN void u3x_gt_drop_expired(uintptr_t base, uint8_t *sub) {
+// 4.8: expired events leave the queue of unreliable events.
+// v7.241: so do the oldest ones beyond 256. A peer whose game hangs stops acknowledging, no data packet goes out to it
+// (window full), and the game keeps queueing a 576-byte state (type 16) per character per send for it: in about a
+// minute that filled the 2 MiB net message pool and every other machine of the match crashed on an allocation
+// (2026-11-22, three PCs). Unreliable events may be dropped by design; a live connection holds a handful.
+extern "C" U3X_FN [[clang::minsize]] void u3x_gt_drop_expired(uintptr_t base, uint8_t *sub) {
+    constexpr uint32_t KEEP = 256;
+    uint32_t queued = 0;
+    for (const uint8_t *n = rd<uint8_t *>(sub, 0x120); n; n = rd<const uint8_t *>(n, 0x20)) queued++;
+    uint32_t excess = queued > KEEP ? queued - KEEP : 0;   // dropped from the front: the oldest go first
     uint8_t *kept = nullptr;   // the last node that stays
     uint8_t *node = rd<uint8_t *>(sub, 0x120);
     while (node) {
         uint8_t *next = rd<uint8_t *>(node, 0x20);
         uint8_t *event = rd<uint8_t *>(node, 0);
-        if (!event || !(g12::slot_call<uint64_t>(event, 7, event) & 0xff)) {
+        const bool over = excess != 0;
+        if (over) excess--;
+        if (!over && (!event || !(g12::slot_call<uint64_t>(event, 7, event) & 0xff))) {
             kept = node;
         } else {
             if (kept)
                 g12::fld<uint8_t *>(kept, 0x20) = next;
             else
                 g12::fld<uint8_t *>(sub, 0x120) = next;
-            const uint8_t references = static_cast<uint8_t>(rd<uint8_t>(event, 10) - 1);
-            g12::fld<uint8_t>(event, 10) = references;
-            if (!references) g12::slot_call<void>(event, 1, event);
+            if (event) {
+                const uint8_t references = static_cast<uint8_t>(rd<uint8_t>(event, 10) - 1);
+                g12::fld<uint8_t>(event, 10) = references;
+                if (!references) g12::slot_call<void>(event, 1, event);
+            }
             if (void *extra = rd<void *>(node, 0x10)) u3h_gt_free(base, extra);
             u3h_gt_free(base, node);
             g12::count_eb(116);
