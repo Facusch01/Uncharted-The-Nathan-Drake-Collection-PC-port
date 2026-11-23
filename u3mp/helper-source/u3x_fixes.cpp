@@ -12275,7 +12275,7 @@ U3X_FN bool not_found(uint32_t id) {
 }
 
 // 4.16 first pass: which animations are used; false when one is not found
-U3X_FN bool collect(uintptr_t base, List list, uint8_t **tabs, int32_t param5, int32_t param6, Notes *t) {
+U3X_FN [[clang::minsize]] bool collect(uintptr_t base, List list, uint8_t **tabs, int32_t param5, int32_t param6, Notes *t) {
     Layers s;
     s.number = -1;
     s.count = 0;
@@ -12410,7 +12410,7 @@ U3X_FN void write_blend(Out *o, const uint8_t *cmd) {
 }
 
 // 4.16 second pass: the commands and the end code
-U3X_FN void write_commands(uintptr_t base, uint8_t *bs, List list, int32_t param6, const Notes *t) {
+U3X_FN [[clang::minsize]] void write_commands(uintptr_t base, uint8_t *bs, List list, int32_t param6, const Notes *t, uint8_t **tabs) {
     Layers s;
     s.number = -1;
     s.count = 0;
@@ -12453,7 +12453,14 @@ U3X_FN void write_commands(uintptr_t base, uint8_t *bs, List list, int32_t param
             u3x_bsw(bs, 2, 2);
             write_entry(&o);
             o.depth += 1;
-            u3x_bsw(bs, 0, 4);
+            // v7.242: the phase (0) in the width the receiver reads for this animation entry: 4, 8 or 16 bits by the pose
+            // animation's frame count, as for any animation. A fixed 4 bits (PS3, whose pose animations have at most 8
+            // frames) put the receiver 4 or 12 bits ahead on PS4 NPCs, so their states ran off the end (decode errors 1,
+            // 2, 11 at the last bits; NPCs flying or T-posing on co-op guests).
+            const uint32_t e = o.use < MAX_NOTES ? t->use[o.use] : MAX_NOTES;
+            const uint8_t *pose = e < t->entries && t->group[e] < 7 ? u3x_anim_by_index(tabs[t->group[e]], static_cast<int32_t>(t->index[e])) : nullptr;
+            const uint32_t frames = pose ? u3x_v_frames(pose) : 0;
+            u3x_bsw(bs, 0, frames > 64 ? 16 : frames > 8 ? 8 : 4);
             o.use += 1;
         } else if (kind == K_EMPTY_POSE) {
             depth_check(&o);
@@ -12515,7 +12522,7 @@ U3X_FN uint32_t pack(uintptr_t base, uint8_t *msg, uint8_t *bs, uint8_t *actor, 
         return 0;
     }
     write_table(bs, &notes);
-    write_commands(base, bs, list, param6, &notes);
+    write_commands(base, bs, list, param6, &notes, tabs);
     return rd<uint32_t>(bs, 8);
 }
 
@@ -44244,14 +44251,10 @@ constexpr uint32_t MODE_TAG = 0x38b89420u, NET_GAMES = 0x3b9a067du;
 struct State {
     uint32_t runs, spawned, there, no_spawner, failed, not_added;
     uint32_t frame, lines, last;
-    uint8_t *probe[2];          // v7.226: the first two NPCs made here, watched for non-finite values
-    uint32_t probe_frames[2], probe_lines;
 };
 U3X_BSS State st;
 U3X_RO const char t_line[] = "U3MP npc spawn: events ", t_sp[] = ", spawned ", t_there[] = ", already there ",
-    t_nosp[] = ", no spawner ", t_fail[] = ", spawn failed ", t_nadd[] = ", not added ",
-    t_probe[] = "U3MP npc probe ", t_frame[] = " frame ", t_sp1[] = " ", t_own[] = " own ",
-    t_layer[] = " L ", t_bad[] = " NONFINITE";
+    t_nosp[] = ", no spawner ", t_fail[] = ", spawn failed ", t_nadd[] = ", not added ";
 
 // the NPC mode the spawner's tag asks for (0 = leave it), as the host's sender works it out
 U3X_FN [[clang::minsize]] uint32_t tag_mode(uintptr_t base, const uint8_t *spawner) {
@@ -44356,11 +44359,6 @@ extern "C" U3X_FN [[clang::minsize]] int u3x_npc_spawn_event(uintptr_t base, con
         return 0;
     }
     st.spawned++;
-    for (int k = 0; k < 2; k++)   // v7.226 probe: the first two
-        if (!st.probe[k]) {
-            st.probe[k] = npc;
-            break;
-        }
 
     // the host's net id (out of the id table and back in when the NPC is listed there)
     if (rd<uint32_t>(npc, 0x98) != id) {
@@ -44383,43 +44381,8 @@ extern "C" U3X_FN [[clang::minsize]] int u3x_npc_spawn_event(uintptr_t base, con
 
 extern "C" U3X_FN [[clang::minsize]] void u3x_npc_spawn_report(uintptr_t base, Log log) {
     using namespace npc_spawn;
-    // v7.226 probe (issue 58: NPCs made on a guest turn non-finite): for the first two, at frames 1..6 and then every
-    // 30 frames (60 lines at most), the raw words of their position (+0xd0) and rotation (+0xe0), the owner byte
-    // (+0x709) and the first three active animation layers
-    // (*(+0x138): entries at +0x28, 0x20 bytes, active byte +0x14; key +0, instance +8: +0x24 +0x28 +0x2c)
-    for (int k = 0; k < 2 && log && st.probe_lines < 60; k++) {
-        const uint8_t *npc = st.probe[k];
-        if (!npc) continue;
-        const uint32_t f = ++st.probe_frames[k];
-        if (f > 6 && f % 30) continue;
-        if (!ptr_ok(npc) || f > 3600) {
-            st.probe[k] = nullptr;
-            continue;
-        }
-        st.probe_lines++;
-        Line l;
-        l.s(t_probe).d(static_cast<uint32_t>(k)).s(t_frame).d(f);
-        bool bad = false;
-        for (uintptr_t o = 0xd0; o < 0xf0; o += 4) {
-            const uint32_t w = rd<uint32_t>(npc, o);
-            bad |= (w & 0x7f800000u) == 0x7f800000u && o < 0xdc;
-            l.s(t_sp1).x(w, 8);
-        }
-        l.s(t_own).x(npc[0x709], 2);
-        const uint8_t *table = rd<const uint8_t *>(npc, 0x138);
-        const uint8_t *entries = ptr_ok(table) ? rd<const uint8_t *>(table, 0x28) : nullptr;
-        const uint32_t count = ptr_ok(table) ? rd<uint32_t>(table, 0x20) : 0;
-        for (uint32_t i = 0, shown = 0; ptr_ok(entries) && i < count && i < 16 && shown < 3; i++) {
-            const uint8_t *e = entries + 0x20 * i;
-            const uint8_t *inst = rd<const uint8_t *>(e, 8);
-            if (!e[0x14] || !ptr_ok(inst)) continue;
-            shown++;
-            l.s(t_layer).x(rd<uint32_t>(e, 0), 8).s(t_sp1).x(rd<uint32_t>(inst, 0x24), 8).s(t_sp1)
-                .x(rd<uint32_t>(inst, 0x28), 8).s(t_sp1).x(rd<uint32_t>(inst, 0x2c), 8);
-        }
-        if (bad) l.s(t_bad);
-        log(base, l.z());
-    }
+    // (v7.242: the v7.226 probe of the first two NPCs is gone: it kept their pointers for a minute and read a freed
+    // NPC's memory, which crashed a co-op guest in London)
     if (++st.frame % 1800u || st.lines >= 40 || !log || st.runs == st.last) return;
     st.last = st.runs;
     st.lines++;
