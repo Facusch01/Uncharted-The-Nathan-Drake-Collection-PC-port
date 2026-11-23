@@ -418,11 +418,16 @@ node, its next pointer and its event pointer are taken first. A node is REMOVED 
 and virtual slot 7 of the event answers true (low 8 bits of the result non-zero); the question is asked exactly once
 per node that has an event, in queue order. A node without event is kept and nothing is called for it.
 
+v7.241: before the walk the nodes are counted; when there are more than 256, the first (oldest) count − 256 nodes
+are removed without asking slot 7 (a node without event among them is removed too, step 2 is then skipped). A peer
+whose game hangs gets no data packet (window full) while the game keeps queueing 576-byte states for it; without a
+bound that filled the 2 MiB net message pool and crashed the other machines of the match.
+
 Removing a node, in this order:
 
 1. Unlink: the head pointer (when the node is the head) or the +0x20 pointer of the last kept node before it is set
    to the node's next pointer.
-2. The event's reference count (u8 at event +10) is decremented by 1 and stored; when it is now 0, virtual slot 1
+2. When the node has an event: its reference count (u8 at event +10) is decremented by 1 and stored; when it is now 0, virtual slot 1
    of the event is called (event).
 3. When the node's pointer at +0x10 is non-null: `u3h_gt_free(base, that pointer)`.
 4. `u3h_gt_free(base, node)`.
