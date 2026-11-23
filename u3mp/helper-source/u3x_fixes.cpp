@@ -482,7 +482,7 @@ extern "C" [[gnu::visibility("hidden")]] void u3h_gt_free(uintptr_t base, void *
 
 U3X_RO static const char t_ev[] = "U3MP ev: peer ", t_id[] = " id ", t_sum[] = " summary: records acked ", t_lost[] = " lost ",
     t_rq[] = ", queued reliable ", t_gq[] = " received ", t_drop[] = " dropped waiting events ",
-    t_evskip[] = " gave up missing events ", t_to[] = "..";
+    t_evskip[] = " gave up missing events ", t_to[] = "..", t_silent[] = " silent 20 s: dropped queued reliable events ";
 
 namespace {
 [[gnu::always_inline]] inline uint32_t qlen(const uint8_t *sub, uintptr_t off) {
@@ -563,6 +563,31 @@ extern "C" U3X_FN [[clang::minsize]] void u3x_ev_scan(uintptr_t b, uint32_t peer
         l.s(t_rq).d(qlen(sub, 0x110)).s(t_gq).d(qlen(sub, 0x130));
         log(b, l.z());
     }
+}
+
+// v7.243: a peer silent for 20 s (no data packet read: sub +0xa8, game seconds) with more than 512 reliable events
+// waiting to be sent to it gets that queue dropped. A hung or gone peer acknowledges nothing, so every event the game
+// queues for it stays; in ~70 s the 2 MiB net message pool ran out and the host crashed (2026-11-23). A peer that
+// comes back after such a silence gives the missing events up through the gap skip above. A peer on a loading screen
+// is silent too, but does not get 512 events queued in that time.
+extern "C" U3X_FN [[clang::minsize]] void u3x_gt_drop_silent(uintptr_t b, uint8_t *sub, uint32_t now, Log log, uint32_t peer) {
+    const uint32_t heard = rd<uint32_t>(sub, 0xa8);
+    if (!heard || !rd<uint32_t>(sub, 8) || !f_less(0x41a00000u, f_sub(now, heard))) return;   // 20.0
+    uint32_t queued = 0;
+    for (const uint8_t *q = rd<uint8_t *>(sub, 0x110); q && queued <= 512; q = rd<const uint8_t *>(q, 0x20)) queued++;
+    if (queued <= 512) return;
+    uint8_t *node = rd<uint8_t *>(sub, 0x110);
+    const uint32_t first = rd<uint32_t>(node, 8);
+    uint32_t dropped = 0;
+    while (node) {
+        uint8_t *next = rd<uint8_t *>(node, 0x20);
+        free_received(b, node);
+        dropped++;
+        node = next;
+    }
+    *reinterpret_cast<uint8_t **>(sub + 0x110) = nullptr;
+    *reinterpret_cast<uint8_t **>(sub + 0x118) = nullptr;
+    if (log) ev_note(b, log, peer, t_silent, first, first + dropped - 1u);
 }
 
 // ===== independent rewrites of former PS3 ports (v7.113; HELPER-PORT-ANALYSIS.md, easiest first) =====
@@ -41481,14 +41506,17 @@ U3X_FN void send_all(uintptr_t base, uint32_t now, Log log) {
         uint8_t *entry = entry_at(base, index);
         const int32_t handle = rd<int32_t>(entry, 0x34);
         const uint32_t port = rd<uint16_t>(entry, 0x30);
+        uint8_t *sub = entry + 0x40;
+        // v7.243: every connection's queues stay bounded, also one this side no longer sends to (a timed-out peer
+        // keeps getting events queued by the game): the unreliable cap, and a silent peer's reliable queue
+        u3x_gt_drop_expired(base, sub);
+        u3x_gt_drop_silent(base, sub, now, log, index);
         if (!rd<uint8_t>(entry, 4) || !handle || !port) continue;
         const uint32_t ip = rd<uint32_t>(entry, 0x2c);
-        uint8_t *sub = entry + 0x40;
         Timer *t = &timer[index];
 
         u3x_ev_scan(base, index, handle, sub, 0, eb[113], log);
         u3x_ev_scan(base, index, handle, sub, 1, eb[113], log);
-        u3x_gt_drop_expired(base, sub);
 
         if (f_not_above(t->ping, now)) {
             GtStream out;
